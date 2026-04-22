@@ -6,7 +6,13 @@ async function postJson(url, payload = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await response.json();
+  const raw = await response.text();
+  let data;
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(raw || `Request failed with status ${response.status}`);
+  }
   if (!response.ok) {
     throw new Error(data.error || "Request failed");
   }
@@ -15,7 +21,13 @@ async function postJson(url, payload = {}) {
 
 async function getJson(url) {
   const response = await fetch(url);
-  const data = await response.json();
+  const raw = await response.text();
+  let data;
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(raw || `Request failed with status ${response.status}`);
+  }
   if (!response.ok) {
     throw new Error(data.error || "Request failed");
   }

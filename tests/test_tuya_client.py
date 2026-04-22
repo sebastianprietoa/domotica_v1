@@ -23,6 +23,14 @@ class FakeOpenAPI:
         return {"success": True}
 
     def get(self, path: str, params: dict | None = None) -> dict:
+        if path == "/v1.3/iot-03/devices":
+            return {
+                "success": True,
+                "result": {
+                    "list": [{"id": "device-1", "name": "living 2"}],
+                    "total": 1,
+                },
+            }
         if path == "/v1.0/expand/devices":
             return {"success": True, "result": [{"id": "device-1", "name": "living 2"}]}
         if path.endswith("/devices"):
@@ -44,6 +52,8 @@ def test_tuya_client_lists_devices() -> None:
 
 class FakeOpenAPIFallback(FakeOpenAPI):
     def get(self, path: str, params: dict | None = None) -> dict:
+        if path == "/v1.3/iot-03/devices":
+            return {"success": False, "code": 1106, "msg": "permission deny"}
         if path == "/v1.0/expand/devices":
             return {"success": False, "code": 1106, "msg": "permission deny"}
         return super().get(path, params)

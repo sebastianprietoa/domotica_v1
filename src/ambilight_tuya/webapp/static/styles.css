@@ -1,13 +1,13 @@
 :root {
   color-scheme: light;
-  --bg: #f5efe3;
-  --paper: #fffaf2;
-  --ink: #182127;
-  --muted: #53616b;
-  --accent: #d65a31;
-  --accent-dark: #9f3413;
-  --border: #e6d7be;
-  --shadow: 0 18px 50px rgba(24, 33, 39, 0.12);
+  --bg: #dff6f0;
+  --paper: #f3fffb;
+  --ink: #0c2d2b;
+  --muted: #426867;
+  --accent: #0f9d7a;
+  --accent-dark: #0a745a;
+  --border: #94d9ca;
+  --shadow: 0 18px 50px rgba(12, 45, 43, 0.16);
 }
 
 * {
@@ -18,8 +18,9 @@ body {
   margin: 0;
   font-family: "Segoe UI", sans-serif;
   background:
-    radial-gradient(circle at top left, rgba(214, 90, 49, 0.18), transparent 24rem),
-    linear-gradient(180deg, #f8f2e8 0%, var(--bg) 100%);
+    radial-gradient(circle at top left, rgba(15, 157, 122, 0.28), transparent 22rem),
+    radial-gradient(circle at bottom right, rgba(22, 184, 146, 0.22), transparent 20rem),
+    linear-gradient(180deg, #eafff8 0%, var(--bg) 100%);
   color: var(--ink);
 }
 
@@ -41,6 +42,17 @@ body {
   margin: 0 0 0.5rem;
   text-transform: uppercase;
   letter-spacing: 0.12em;
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+
+.build-badge {
+  display: inline-block;
+  margin: 0 0 1rem;
+  padding: 0.45rem 0.8rem;
+  border-radius: 999px;
+  background: rgba(15, 157, 122, 0.15);
+  border: 1px solid var(--border);
   color: var(--accent-dark);
   font-weight: 700;
 }
@@ -115,8 +127,8 @@ button:hover {
 pre {
   margin: 0;
   min-height: 120px;
-  background: #221d1b;
-  color: #dfe7eb;
+  background: #0f2522;
+  color: #d7fff6;
   border-radius: 14px;
   padding: 1rem;
   overflow: auto;

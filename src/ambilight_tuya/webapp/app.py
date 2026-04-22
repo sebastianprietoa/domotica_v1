@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-import io
 import threading
 from typing import Any
 
 from flask import Flask, jsonify, render_template, request
-from PIL import Image
 
 from ambilight_tuya.color_extractor import ColorExtractor
 from ambilight_tuya.config import ConfigError, load_app_config, load_project_config, load_tuya_credentials
@@ -166,14 +164,11 @@ def create_app() -> Flask:
         capture = ScreenCaptureService(app_config.capture)
         frame = capture.capture_frame()
         samples = ColorExtractor(app_config.extraction).extract(frame)
-        image = Image.fromarray(frame)
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
         return jsonify(
             {
                 "monitors": list_monitors(),
+                "frame_shape": list(frame.shape),
                 "samples": _serialize_samples(samples),
-                "preview_png_base64": buffer.getvalue().hex(),
             }
         )
 

@@ -53,19 +53,29 @@ class TuyaClient:
 
     def list_devices(self) -> list[dict[str, Any]]:
         self._ensure_connected()
-        project_response = self._api.get("/v1.0/expand/devices")
-        if project_response and project_response.get("success"):
-            return list(project_response.get("result", []))
-
         uid = getattr(self._api.token_info, "uid", "")
-        if not uid:
-            raise TuyaApiError(
-                "Unable to list devices from project scope and authenticated token does not expose a user uid"
+        if uid:
+            scoped_response = self._api.get(
+                "/v1.3/iot-03/devices",
+                {
+                    "source_type": "tuyaUser",
+                    "source_id": uid,
+                    "page_size": 200,
+                },
             )
+            if scoped_response and scoped_response.get("success"):
+                result = scoped_response.get("result", {})
+                if isinstance(result, dict):
+                    return list(result.get("list", []))
 
-        user_response = self._api.get(f"/v1.0/users/{uid}/devices")
-        self._require_success(user_response)
-        return list(user_response.get("result", []))
+        if uid:
+            user_response = self._api.get(f"/v1.0/users/{uid}/devices")
+            self._require_success(user_response)
+            return list(user_response.get("result", []))
+
+        raise TuyaApiError(
+            "Unable to list devices from Tuya Cloud and authenticated token does not expose a user uid"
+        )
 
     def get_device_status(self, device_id: str) -> DeviceStatus:
         self._ensure_connected()
