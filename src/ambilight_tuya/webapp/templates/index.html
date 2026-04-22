@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ambilight Tuya Localhost</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="layout">
+      <section class="hero">
+        <p class="eyebrow">Localhost Control</p>
+        <h1>Ambilight Tuya Dashboard</h1>
+        <p class="lede">Manipula discovery, estado, color fijo, muestreo de pantalla y sync en tiempo real desde tu navegador.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Estado</h2>
+        <button data-action="refresh-status">Actualizar estado</button>
+        <pre id="status-output">Pulsa "Actualizar estado" para cargar estado y monitores.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Dispositivos</h2>
+        <button data-action="list-devices">Listar dispositivos</button>
+        <pre id="devices-output">Sin datos.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Estado de dispositivo</h2>
+        <form id="device-status-form">
+          <label>Device ID <input name="device_id" placeholder="tuya-device-id" required></label>
+          <button type="submit">Consultar</button>
+        </form>
+        <pre id="device-status-output">Sin datos.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Color fijo</h2>
+        <form id="fixed-color-form">
+          <label>Device ID <input name="device_id" placeholder="Opcional si usas zona"></label>
+          <label>Zona <input name="zone" placeholder="left | center | right"></label>
+          <label>RGB <input name="rgb" value="255,80,40" required></label>
+          <button type="submit">Enviar color</button>
+        </form>
+        <pre id="fixed-color-output">Sin datos.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Muestreo de pantalla</h2>
+        <form id="sample-form">
+          <label>Monitor index <input name="monitor_index" type="number" min="1" placeholder="Opcional"></label>
+          <button type="submit">Capturar muestra</button>
+        </form>
+        <pre id="sample-output">Sin datos.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Sync engine</h2>
+        <form id="sync-form">
+          <label>Duración (s) <input name="duration" type="number" min="0" step="0.1" placeholder="Vacío = indefinido"></label>
+          <label>Monitor index <input name="monitor_index" type="number" min="1" placeholder="Opcional"></label>
+          <label class="checkbox"><input name="dry_run" type="checkbox" checked> Dry run</label>
+          <div class="actions">
+            <button type="submit">Iniciar sync</button>
+            <button type="button" data-action="stop-sync">Detener sync</button>
+          </div>
+        </form>
+        <pre id="sync-output">Sin datos.</pre>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+  </html>

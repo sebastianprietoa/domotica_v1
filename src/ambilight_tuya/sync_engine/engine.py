@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from ambilight_tuya.color_extractor import ColorExtractor
@@ -44,13 +45,21 @@ class AmbilightSyncEngine:
                 self.tuya_client.set_fixed_color(device_id, smoothed, routing.profile)
         return output
 
-    def run(self, duration_seconds: float | None = None, dry_run: bool = False) -> None:
+    def run(
+        self,
+        duration_seconds: float | None = None,
+        dry_run: bool = False,
+        stop_event: threading.Event | None = None,
+    ) -> None:
         start = time.perf_counter()
         interval = 1.0 / self.app_config.capture.target_fps
-        while True:
+        while stop_event is None or not stop_event.is_set():
             loop_start = time.perf_counter()
             self.process_once(dry_run=dry_run)
             if duration_seconds is not None and (loop_start - start) >= duration_seconds:
                 return
             elapsed = time.perf_counter() - loop_start
-            time.sleep(max(0.0, interval - elapsed))
+            if stop_event is not None:
+                stop_event.wait(max(0.0, interval - elapsed))
+            else:
+                time.sleep(max(0.0, interval - elapsed))

@@ -131,6 +131,34 @@ Captura un frame del monitor configurado y muestra el muestreo por zonas:
 python scripts/screen_sample_test.py --save-preview docs/sample_frame.png
 ```
 
+## Dashboard localhost
+
+Puedes manipular las acciones principales desde una UI local:
+
+```powershell
+python scripts/run_localhost.py
+```
+
+Luego abre:
+
+```text
+http://127.0.0.1:8787
+```
+
+Desde ahi puedes:
+
+- listar dispositivos Tuya
+- consultar estado de un dispositivo
+- enviar un color fijo por `device_id` o por zona
+- capturar una muestra de pantalla
+- iniciar y detener el sync engine
+
+Notas:
+
+- `screen sample` y `sync dry-run` no requieren credenciales Tuya
+- las acciones contra la nube si requieren `.env` configurado
+- el sync puede iniciarse en `dry-run` para validar colores sin tocar las luces
+
 ## Ejecutar modo sync
 
 Arranca el loop de sincronizacion:
@@ -184,6 +212,7 @@ Ya queda funcional:
 - smoothing basico configurable
 - mapping zona -> dispositivos
 - scripts operativos minimos
+- dashboard localhost para manipular acciones desde navegador
 - tests unitarios base
 
 Pendiente para siguientes iteraciones:
