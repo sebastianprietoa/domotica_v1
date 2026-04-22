@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 class OpenApiProtocol(Protocol):
     token_info: Any
+    resolved_auth_scheme: str
 
     def connect(self) -> dict[str, Any]:
         ...
@@ -65,6 +66,20 @@ class TuyaClient:
             raise TuyaApiError("Current Tuya API client does not support restoring OAuth tokens")
         restore_token(token_response)
         self._connected = True
+
+    def debug_snapshot(self) -> dict[str, Any]:
+        access_id = self.credentials.access_id
+        return {
+            "api_endpoint": self.credentials.api_endpoint,
+            "configured_auth_scheme": self.credentials.auth_scheme,
+            "resolved_auth_scheme": getattr(self._api, "resolved_auth_scheme", self.credentials.auth_scheme),
+            "app_identifier": self.credentials.app_identifier,
+            "client_id_suffix": access_id[-6:] if len(access_id) >= 6 else access_id,
+            "connected": self._connected,
+            "uid": getattr(getattr(self._api, "token_info", None), "uid", None),
+            "last_connect_attempts": getattr(self._api, "last_connect_attempts", []),
+            "last_request": getattr(self._api, "last_request_summary", None),
+        }
 
     def _ensure_connected(self) -> None:
         if not self._connected:

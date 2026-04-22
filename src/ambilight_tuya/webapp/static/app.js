@@ -49,11 +49,21 @@ function writeOutput(selector, payload) {
   document.querySelector(selector).textContent = typeof payload === "string" ? payload : pretty(payload);
 }
 
+async function refreshDiagnostics() {
+  try {
+    writeOutput("#debug-output", await getJson("/api/debug/logs"));
+  } catch (error) {
+    writeOutput("#debug-output", error.message);
+  }
+}
+
 bindAction("[data-action='refresh-status']", async () => {
   try {
     writeOutput("#status-output", await getJson("/api/status"));
   } catch (error) {
     writeOutput("#status-output", error.message);
+  } finally {
+    await refreshDiagnostics();
   }
 });
 
@@ -62,6 +72,8 @@ bindAction("[data-action='list-devices']", async () => {
     writeOutput("#devices-output", await postJson("/api/list-devices"));
   } catch (error) {
     writeOutput("#devices-output", error.message);
+  } finally {
+    await refreshDiagnostics();
   }
 });
 
@@ -72,6 +84,8 @@ bindForm("#device-status-form", async (form) => {
     }));
   } catch (error) {
     writeOutput("#device-status-output", error.message);
+  } finally {
+    await refreshDiagnostics();
   }
 });
 
@@ -84,6 +98,8 @@ bindForm("#power-form", async (form) => {
     }));
   } catch (error) {
     writeOutput("#power-output", error.message);
+  } finally {
+    await refreshDiagnostics();
   }
 });
 
@@ -96,6 +112,8 @@ bindForm("#fixed-color-form", async (form) => {
     }));
   } catch (error) {
     writeOutput("#fixed-color-output", error.message);
+  } finally {
+    await refreshDiagnostics();
   }
 });
 
@@ -106,6 +124,8 @@ bindForm("#sample-form", async (form) => {
     }));
   } catch (error) {
     writeOutput("#sample-output", error.message);
+  } finally {
+    await refreshDiagnostics();
   }
 });
 
@@ -118,6 +138,8 @@ bindForm("#sync-form", async (form) => {
     }));
   } catch (error) {
     writeOutput("#sync-output", error.message);
+  } finally {
+    await refreshDiagnostics();
   }
 });
 
@@ -126,5 +148,23 @@ bindAction("[data-action='stop-sync']", async () => {
     writeOutput("#sync-output", await postJson("/api/sync/stop"));
   } catch (error) {
     writeOutput("#sync-output", error.message);
+  } finally {
+    await refreshDiagnostics();
   }
 });
+
+bindAction("[data-action='refresh-debug']", async () => {
+  await refreshDiagnostics();
+});
+
+bindAction("[data-action='clear-debug']", async () => {
+  try {
+    writeOutput("#debug-output", await postJson("/api/debug/clear"));
+  } catch (error) {
+    writeOutput("#debug-output", error.message);
+  } finally {
+    await refreshDiagnostics();
+  }
+});
+
+refreshDiagnostics();

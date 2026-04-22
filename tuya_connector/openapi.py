@@ -73,6 +73,8 @@ class TuyaOpenAPI:
         self.auth_scheme = auth_scheme
         self.app_identifier = app_identifier or "com.sebastianprietoa.ambilight.localhost"
         self._resolved_auth_scheme: str | None = None
+        self.last_connect_attempts: list[Dict[str, Any]] = []
+        self.last_request_summary: Dict[str, Any] | None = None
 
         self.token_info: TuyaTokenInfo = None
 
@@ -167,6 +169,26 @@ class TuyaOpenAPI:
     def resolved_auth_scheme(self) -> str:
         return self._resolved_auth_scheme or ("cloud" if self.auth_scheme == "auto" else self.auth_scheme)
 
+    @staticmethod
+    def _sanitize_params(params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not params:
+            return {}
+        sanitized: Dict[str, Any] = {}
+        for key, value in params.items():
+            sanitized[key] = "***" if key in {"code", "access_token", "refresh_token"} else value
+        return sanitized
+
+    @staticmethod
+    def _response_summary(response: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if response is None:
+            return {"success": False, "code": None, "msg": "No response", "tid": None}
+        return {
+            "success": bool(response.get("success")),
+            "code": response.get("code"),
+            "msg": response.get("msg"),
+            "tid": response.get("tid"),
+        }
+
     def __refresh_access_token_if_need(self, path: str):
         if self.is_connect() is False:
             return
@@ -200,6 +222,7 @@ class TuyaOpenAPI:
         Returns:
             response: connect response
         """
+        self.last_connect_attempts = []
         schemes = [self.auth_scheme] if self.auth_scheme != "auto" else ["cloud", "app"]
         last_response: Dict[str, Any] | None = None
         for scheme in schemes:
@@ -207,6 +230,9 @@ class TuyaOpenAPI:
             self._resolved_auth_scheme = scheme
             response = self.get(TO_B_TOKEN_API, {"grant_type": 1})
             last_response = response
+            self.last_connect_attempts.append(
+                {"scheme": scheme, "response": self._response_summary(response)}
+            )
             if response and response.get("success"):
                 self.token_info = TuyaTokenInfo(response)
                 return response
@@ -220,6 +246,9 @@ class TuyaOpenAPI:
         self.token_info = None
         self._resolved_auth_scheme = "app"
         response = self.get(TO_B_TOKEN_API, {"grant_type": 2, "code": code})
+        self.last_connect_attempts = [
+            {"scheme": "app-oauth-code", "response": self._response_summary(response)}
+        ]
         if response and response.get("success"):
             self.token_info = TuyaTokenInfo(response)
             return response
@@ -285,12 +314,34 @@ class TuyaOpenAPI:
         )
 
         if response.ok is False:
+            self.last_request_summary = {
+                "method": method,
+                "path": path,
+                "params": self._sanitize_params(params),
+                "auth_scheme": self.resolved_auth_scheme,
+                "http_status": response.status_code,
+                "success": False,
+                "code": None,
+                "msg": response.text,
+                "tid": None,
+            }
             logger.error(
-                f"Response error: code={response.status_code}, body={response.body}"
+                f"Response error: code={response.status_code}, body={response.text}"
             )
             return None
 
         result = response.json()
+        self.last_request_summary = {
+            "method": method,
+            "path": path,
+            "params": self._sanitize_params(params),
+            "auth_scheme": self.resolved_auth_scheme,
+            "http_status": response.status_code,
+            "success": bool(result.get("success")),
+            "code": result.get("code"),
+            "msg": result.get("msg"),
+            "tid": result.get("tid"),
+        }
 
         logger.debug(
             f"Response: {json.dumps(filter_logger(result), ensure_ascii=False, indent=2)}"

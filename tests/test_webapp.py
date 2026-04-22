@@ -34,6 +34,17 @@ def test_oauth_config_endpoint_is_available() -> None:
     assert "status" in payload
 
 
+def test_debug_logs_endpoint_is_available() -> None:
+    app = create_app()
+    client = app.test_client()
+
+    response = client.get("/api/debug/logs")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert "entries" in payload
+
+
 def test_list_devices_requires_oauth_for_app_authorization(monkeypatch) -> None:
     monkeypatch.setattr(
         "ambilight_tuya.webapp.app.load_tuya_credentials",
@@ -53,3 +64,7 @@ def test_list_devices_requires_oauth_for_app_authorization(monkeypatch) -> None:
     assert response.status_code == 400
     payload = response.get_json()
     assert "OAuth 2.0 user authorization" in payload["error"]
+
+    debug_response = client.get("/api/debug/logs")
+    debug_payload = debug_response.get_json()
+    assert any(entry["event"] == "tuya.oauth.required" for entry in debug_payload["entries"])
