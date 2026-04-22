@@ -139,6 +139,18 @@ Puedes manipular las acciones principales desde una UI local:
 python scripts/run_localhost.py
 ```
 
+Si tu `py` o tu `.venv` local no tienen `Flask` o quedaron rotos, puedes usar directamente el runtime empaquetado del workspace:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_localhost.ps1
+```
+
+O desde `cmd`:
+
+```bat
+scripts\run_localhost.cmd
+```
+
 Luego abre:
 
 ```text
