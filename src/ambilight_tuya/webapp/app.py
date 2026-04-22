@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+import os
 import threading
 from typing import Any
 
@@ -36,7 +37,13 @@ class SyncSession:
             state["running"] = alive
             return state
 
-    def start(self, app_config: AppConfig, credentials, dry_run: bool, duration: float | None) -> dict[str, Any]:
+    def start(
+        self,
+        app_config: AppConfig,
+        tuya_client: TuyaClient | None,
+        dry_run: bool,
+        duration: float | None,
+    ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("Sync loop is already running")
@@ -53,8 +60,7 @@ class SyncSession:
 
             def runner() -> None:
                 try:
-                    client = None if dry_run else TuyaClient(credentials)
-                    engine = AmbilightSyncEngine(app_config, client)
+                    engine = AmbilightSyncEngine(app_config, tuya_client)
                     engine.run(duration_seconds=duration, dry_run=dry_run, stop_event=stop_event)
                 except Exception as exc:  # pragma: no cover
                     with self._lock:
@@ -72,6 +78,42 @@ class SyncSession:
             if self._stop_event is not None:
                 self._stop_event.set()
             return self.status()
+
+
+class OAuthSession:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._token_response: dict[str, Any] | None = None
+        self._last_code: str | None = None
+        self._last_error: str | None = None
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "authorized": self._token_response is not None,
+                "last_code": self._last_code,
+                "last_error": self._last_error,
+            }
+
+    def set_token_response(self, code: str, token_response: dict[str, Any]) -> None:
+        with self._lock:
+            self._last_code = code
+            self._token_response = token_response
+            self._last_error = None
+
+    def get_token_response(self) -> dict[str, Any] | None:
+        with self._lock:
+            return self._token_response
+
+    def set_error(self, error_message: str) -> None:
+        with self._lock:
+            self._last_error = error_message
+
+    def clear(self) -> None:
+        with self._lock:
+            self._token_response = None
+            self._last_code = None
+            self._last_error = None
 
 
 def _parse_rgb(raw_value: str) -> RGBColor:
@@ -95,6 +137,27 @@ def create_app() -> Flask:
     configure_logging()
     app = Flask(__name__, template_folder="templates", static_folder="static")
     sync_session = SyncSession()
+    oauth_session = OAuthSession()
+
+    def _oauth_callback_url() -> str:
+        return os.getenv(
+            "TUYA_OAUTH_CALLBACK_URL",
+            "http://127.0.0.1:8787/api/tuya/oauth/callback",
+        )
+
+    def _get_tuya_client(prefer_user_oauth: bool = False) -> TuyaClient:
+        credentials = load_tuya_credentials()
+        client = TuyaClient(credentials)
+        token_response = oauth_session.get_token_response()
+        if token_response is not None:
+            client.restore_token_response(token_response)
+            return client
+        if prefer_user_oauth and credentials.auth_scheme in {"app", "auto"}:
+            raise TuyaApiError(
+                "No active Tuya OAuth 2.0 user authorization. In Tuya Platform go to Devices > Link App Account > Configure OAuth 2.0 Authorization and set the callback URL to "
+                f"{_oauth_callback_url()}"
+            )
+        return client
 
     @app.get("/")
     def index() -> str:
@@ -105,14 +168,15 @@ def create_app() -> Flask:
         return jsonify(
             {
                 "sync": sync_session.status(),
+                "oauth": oauth_session.status(),
+                "oauth_callback_url": _oauth_callback_url(),
                 "monitors": list_monitors(),
             }
         )
 
     @app.post("/api/list-devices")
     def api_list_devices():
-        credentials, _ = load_app_config()
-        devices = TuyaClient(credentials).list_devices()
+        devices = _get_tuya_client(prefer_user_oauth=True).list_devices()
         return jsonify({"devices": devices})
 
     @app.post("/api/get-device-status")
@@ -121,8 +185,7 @@ def create_app() -> Flask:
         device_id = str(payload.get("device_id", "")).strip()
         if not device_id:
             raise ValueError("device_id is required")
-        credentials, _ = load_app_config()
-        status = TuyaClient(credentials).get_device_status(device_id)
+        status = _get_tuya_client(prefer_user_oauth=True).get_device_status(device_id)
         return jsonify(asdict(status))
 
     @app.post("/api/set-fixed-color")
@@ -131,8 +194,8 @@ def create_app() -> Flask:
         device_id = str(payload.get("device_id", "")).strip()
         zone = str(payload.get("zone", "")).strip()
         rgb = _parse_rgb(str(payload.get("rgb", "")).strip())
-        credentials, app_config = load_app_config()
-        client = TuyaClient(credentials)
+        _, app_config = load_app_config()
+        client = _get_tuya_client(prefer_user_oauth=True)
         if device_id:
             result = client.set_fixed_color(device_id, rgb, app_config.command_profiles["default"])
             return jsonify({"device_id": device_id, "result": result})
@@ -180,17 +243,57 @@ def create_app() -> Flask:
         duration = float(duration_raw) if duration_raw not in (None, "", "null") else None
         monitor_index = payload.get("monitor_index")
         app_config = load_project_config()
-        credentials = None if dry_run else load_tuya_credentials()
+        tuya_client = None if dry_run else _get_tuya_client(prefer_user_oauth=True)
         if monitor_index is not None:
             app_config = replace(
                 app_config,
                 capture=replace(app_config.capture, monitor_index=int(monitor_index)),
             )
-        return jsonify(sync_session.start(app_config, credentials, dry_run=dry_run, duration=duration))
+        return jsonify(sync_session.start(app_config, tuya_client, dry_run=dry_run, duration=duration))
 
     @app.post("/api/sync/stop")
     def api_sync_stop():
         return jsonify(sync_session.stop())
+
+    @app.get("/api/tuya/oauth/config")
+    def api_oauth_config():
+        return jsonify(
+            {
+                "callback_url": _oauth_callback_url(),
+                "status": oauth_session.status(),
+                "message": "Configure this callback URL in Tuya Platform > Devices > Link App Account > Configure OAuth 2.0 Authorization.",
+            }
+        )
+
+    @app.get("/api/tuya/oauth/callback")
+    def api_oauth_callback():
+        code = request.args.get("code", "").strip()
+        error = request.args.get("error", "").strip()
+        error_description = request.args.get("error_description", "").strip()
+        if error:
+            message = error_description or error
+            oauth_session.set_error(message)
+            return (
+                f"<h1>Tuya OAuth error</h1><p>{message}</p><p>Return to the dashboard and try again.</p>",
+                400,
+                {"Content-Type": "text/html; charset=utf-8"},
+            )
+        if not code:
+            oauth_session.set_error("Missing OAuth authorization code in callback request")
+            return (
+                "<h1>Missing Tuya OAuth code</h1><p>The callback did not include a code.</p>",
+                400,
+                {"Content-Type": "text/html; charset=utf-8"},
+            )
+
+        client = _get_tuya_client(prefer_user_oauth=False)
+        token_response = client.connect_with_authorization_code(code)
+        oauth_session.set_token_response(code, token_response)
+        return (
+            "<h1>Tuya OAuth connected</h1><p>User authorization was stored successfully. Return to the dashboard and refresh status.</p>",
+            200,
+            {"Content-Type": "text/html; charset=utf-8"},
+        )
 
     @app.errorhandler(ConfigError)
     @app.errorhandler(TuyaApiError)

@@ -31,13 +31,15 @@ class TuyaApiError(RuntimeError):
 @dataclass
 class TuyaClient:
     credentials: TuyaCredentials
-    api_factory: Callable[[str, str, str], OpenApiProtocol] = TuyaOpenAPI
+    api_factory: Callable[..., OpenApiProtocol] = TuyaOpenAPI
 
     def __post_init__(self) -> None:
         self._api = self.api_factory(
             self.credentials.api_endpoint,
             self.credentials.access_id,
             self.credentials.access_key,
+            auth_scheme=self.credentials.auth_scheme,
+            app_identifier=self.credentials.app_identifier,
         )
         self._connected = False
 
@@ -47,12 +49,41 @@ class TuyaClient:
             raise TuyaApiError(f"Unable to authenticate with Tuya: {response}")
         self._connected = True
 
+    def connect_with_authorization_code(self, code: str) -> dict[str, Any]:
+        connect_with_code = getattr(self._api, "connect_with_authorization_code", None)
+        if connect_with_code is None:
+            raise TuyaApiError("Current Tuya API client does not support OAuth 2.0 authorization codes")
+        response = connect_with_code(code)
+        if not response or not response.get("success"):
+            raise TuyaApiError(f"Unable to exchange OAuth authorization code with Tuya: {response}")
+        self._connected = True
+        return response
+
+    def restore_token_response(self, token_response: dict[str, Any]) -> None:
+        restore_token = getattr(self._api, "restore_token", None)
+        if restore_token is None:
+            raise TuyaApiError("Current Tuya API client does not support restoring OAuth tokens")
+        restore_token(token_response)
+        self._connected = True
+
     def _ensure_connected(self) -> None:
         if not self._connected:
             self.connect()
 
+    def _uses_app_authorization(self) -> bool:
+        return getattr(self._api, "resolved_auth_scheme", self.credentials.auth_scheme) == "app"
+
     def list_devices(self) -> list[dict[str, Any]]:
         self._ensure_connected()
+        if self._uses_app_authorization():
+            app_response = self._api.get(
+                "/v1.0/iot-01/associated-users/devices",
+                {"size": 200},
+            )
+            self._require_success(app_response)
+            result = app_response.get("result", {})
+            return list(result.get("devices", []))
+
         uid = getattr(self._api.token_info, "uid", "")
         if uid:
             scoped_response = self._api.get(
@@ -68,18 +99,20 @@ class TuyaClient:
                 if isinstance(result, dict):
                     return list(result.get("list", []))
 
-        if uid:
             user_response = self._api.get(f"/v1.0/users/{uid}/devices")
             self._require_success(user_response)
             return list(user_response.get("result", []))
 
-        raise TuyaApiError(
-            "Unable to list devices from Tuya Cloud and authenticated token does not expose a user uid"
-        )
+        raise TuyaApiError("Unable to list devices from Tuya Cloud and authenticated token does not expose a user uid")
 
     def get_device_status(self, device_id: str) -> DeviceStatus:
         self._ensure_connected()
-        response = self._api.get(f"/v1.0/iot-03/devices/{device_id}/status")
+        path = (
+            f"/v1.0/devices/{device_id}/status"
+            if self._uses_app_authorization()
+            else f"/v1.0/iot-03/devices/{device_id}/status"
+        )
+        response = self._api.get(path)
         self._require_success(response)
         result = response.get("result", [])
         online = any(item.get("value") for item in result if item.get("code") in {"switch_led", "switch", "online"})
@@ -87,8 +120,13 @@ class TuyaClient:
 
     def send_commands(self, device_id: str, commands: list[dict[str, Any]]) -> dict[str, Any]:
         self._ensure_connected()
+        path = (
+            f"/v1.0/devices/{device_id}/commands"
+            if self._uses_app_authorization()
+            else f"/v1.0/iot-03/devices/{device_id}/commands"
+        )
         response = self._api.post(
-            f"/v1.0/iot-03/devices/{device_id}/commands",
+            path,
             {"commands": commands},
         )
         self._require_success(response)

@@ -82,6 +82,9 @@ Variables requeridas:
 
 Variables opcionales:
 
+- `TUYA_AUTH_SCHEME`
+- `TUYA_APP_IDENTIFIER`
+- `TUYA_OAUTH_CALLBACK_URL`
 - `TUYA_MQ_ENDPOINT`
 - `TUYA_DEFAULT_DEVICE_ID`
 - `AMBILIGHT_CONFIG_PATH`
@@ -93,11 +96,20 @@ Ejemplo rapido:
 TUYA_ACCESS_ID=replace-me
 TUYA_ACCESS_KEY=replace-me
 TUYA_API_ENDPOINT=https://openapi.tuyaus.com
+TUYA_AUTH_SCHEME=app
+TUYA_APP_IDENTIFIER=com.sebastianprietoa.ambilight.localhost
+TUYA_OAUTH_CALLBACK_URL=http://127.0.0.1:8787/api/tuya/oauth/callback
 TUYA_MQ_ENDPOINT=wss://mqe.tuyaus.com:8285/
 TUYA_DEFAULT_DEVICE_ID=
 AMBILIGHT_CONFIG_PATH=config/config.yaml
 AMBILIGHT_LOG_LEVEL=INFO
 ```
+
+Notas para Smart Life + App Authorization:
+
+- usa las credenciales del bloque `App Authorization`, no las de `Cloud Authorization`
+- configura en Tuya el callback OAuth 2.0 con el mismo valor de `TUYA_OAUTH_CALLBACK_URL`
+- si usas el dashboard en `127.0.0.1:8787`, deja esa URL exactamente igual en Tuya y en `.env`
 
 ## Descubrir dispositivos Tuya
 
@@ -170,6 +182,25 @@ Notas:
 - `screen sample` y `sync dry-run` no requieren credenciales Tuya
 - las acciones contra la nube si requieren `.env` configurado
 - el sync puede iniciarse en `dry-run` para validar colores sin tocar las luces
+- si usas `App Authorization`, primero completa el callback OAuth en Tuya y autoriza al usuario antes de listar dispositivos o controlar luces
+
+## OAuth para Smart Life
+
+Si tu proyecto usa `Link App Account` con Smart Life, el backend necesita el flujo OAuth 2.0 de usuario.
+
+1. En Tuya ve a `Authorization > App Authorization`.
+2. Crea o usa una autorizacion tipo `Others`.
+3. Configura el callback con el valor de `TUYA_OAUTH_CALLBACK_URL`.
+4. Arranca el dashboard local.
+5. Abre `http://127.0.0.1:8787/api/tuya/oauth/config` para confirmar el callback esperado.
+6. Completa la autorizacion de usuario en Tuya.
+7. Cuando Tuya redirija a `/api/tuya/oauth/callback`, el backend guardara el token en memoria y el dashboard ya podra usar:
+   - listar dispositivos
+   - consultar estado
+   - color fijo
+   - sync real sin `dry-run`
+
+Nota: el token OAuth actual se guarda solo en memoria del proceso local. Si reinicias el servidor, debes autorizar de nuevo.
 
 ## Ejecutar modo sync
 

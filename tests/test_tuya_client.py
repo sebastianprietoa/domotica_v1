@@ -12,10 +12,18 @@ class FakeTokenInfo:
 
 
 class FakeOpenAPI:
-    def __init__(self, endpoint: str, access_id: str, access_key: str) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        access_id: str,
+        access_key: str,
+        auth_scheme: str = "auto",
+        app_identifier: str | None = None,
+    ) -> None:
         self.endpoint = endpoint
         self.access_id = access_id
         self.access_key = access_key
+        self.resolved_auth_scheme = "cloud" if auth_scheme == "auto" else auth_scheme
         self.token_info = FakeTokenInfo()
         self.commands: list[tuple[str, dict]] = []
 
@@ -23,6 +31,14 @@ class FakeOpenAPI:
         return {"success": True}
 
     def get(self, path: str, params: dict | None = None) -> dict:
+        if path == "/v1.0/iot-01/associated-users/devices":
+            return {
+                "success": True,
+                "result": {
+                    "devices": [{"id": "device-app-1", "name": "smart life bulb"}],
+                    "total": 1,
+                },
+            }
         if path == "/v1.3/iot-03/devices":
             return {
                 "success": True,
@@ -65,6 +81,20 @@ def test_tuya_client_falls_back_to_user_devices() -> None:
         api_factory=FakeOpenAPIFallback,
     )
     assert client.list_devices() == [{"id": "device-1"}]
+
+
+def test_tuya_client_lists_devices_for_app_authorization() -> None:
+    client = TuyaClient(
+        TuyaCredentials(
+            "id",
+            "key",
+            "https://example.com",
+            auth_scheme="app",
+            app_identifier="com.sebastianprietoa.ambilight.localhost",
+        ),
+        api_factory=FakeOpenAPI,
+    )
+    assert client.list_devices() == [{"id": "device-app-1", "name": "smart life bulb"}]
 
 
 def test_tuya_client_sets_color() -> None:

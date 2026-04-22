@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import time
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 import requests
@@ -59,6 +60,8 @@ class TuyaOpenAPI:
         access_id: str,
         access_secret: str,
         lang: str = "en",
+        auth_scheme: str = "auto",
+        app_identifier: str | None = None,
     ):
         """Init TuyaOpenAPI."""
         self.session = requests.session()
@@ -67,6 +70,9 @@ class TuyaOpenAPI:
         self.access_id = access_id
         self.access_secret = access_secret
         self.lang = lang
+        self.auth_scheme = auth_scheme
+        self.app_identifier = app_identifier or "com.sebastianprietoa.ambilight.localhost"
+        self._resolved_auth_scheme: str | None = None
 
         self.token_info: TuyaTokenInfo = None
 
@@ -79,7 +85,8 @@ class TuyaOpenAPI:
         path: str,
         params: Optional[Dict[str, Any]] = None,
         body: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[str, int]:
+        auth_scheme: str = "cloud",
+    ) -> Tuple[str, int, Dict[str, str]]:
 
         # HTTPMethod
         str_to_sign = method
@@ -96,7 +103,23 @@ class TuyaOpenAPI:
         )
         str_to_sign += "\n"
 
+        signature_headers: Dict[str, str] = {}
+        signature_headers_block = ""
+        nonce = ""
+        identifier = ""
+        if auth_scheme == "app":
+            nonce = uuid.uuid4().hex
+            signature_headers = {
+                "area_id": self.app_identifier,
+                "req_id": uuid.uuid4().hex,
+            }
+            signature_headers_block = "".join(
+                f"{key}:{value}\n" for key, value in signature_headers.items()
+            )
+            identifier = self.app_identifier
+
         # Header
+        str_to_sign += signature_headers_block
         str_to_sign += "\n"
 
         # URL
@@ -116,9 +139,14 @@ class TuyaOpenAPI:
         t = int(time.time() * 1000)
 
         message = self.access_id
-        if self.token_info is not None:
-            message += self.token_info.access_token
-        message += str(t) + str_to_sign
+        if auth_scheme == "app":
+            if self.token_info is not None and len(self.token_info.access_token) > 0:
+                message += self.token_info.access_token
+            message += str(t) + nonce + identifier + str_to_sign
+        else:
+            if self.token_info is not None:
+                message += self.token_info.access_token
+            message += str(t) + str_to_sign
         sign = (
             hmac.new(
                 self.access_secret.encode("utf8"),
@@ -128,7 +156,16 @@ class TuyaOpenAPI:
             .hexdigest()
             .upper()
         )
-        return sign, t
+        request_headers: Dict[str, str] = {}
+        if auth_scheme == "app":
+            request_headers["nonce"] = nonce
+            request_headers["Signature-Headers"] = "area_id:req_id"
+            request_headers.update(signature_headers)
+        return sign, t, request_headers
+
+    @property
+    def resolved_auth_scheme(self) -> str:
+        return self._resolved_auth_scheme or ("cloud" if self.auth_scheme == "auto" else self.auth_scheme)
 
     def __refresh_access_token_if_need(self, path: str):
         if self.is_connect() is False:
@@ -163,15 +200,37 @@ class TuyaOpenAPI:
         Returns:
             response: connect response
         """
-        response = self.get(TO_B_TOKEN_API, {"grant_type": 1})
+        schemes = [self.auth_scheme] if self.auth_scheme != "auto" else ["cloud", "app"]
+        last_response: Dict[str, Any] | None = None
+        for scheme in schemes:
+            self.token_info = None
+            self._resolved_auth_scheme = scheme
+            response = self.get(TO_B_TOKEN_API, {"grant_type": 1})
+            last_response = response
+            if response and response.get("success"):
+                self.token_info = TuyaTokenInfo(response)
+                return response
 
-        if not response["success"]:
+        self._resolved_auth_scheme = None
+        return last_response or {"success": False, "msg": "Unable to connect to Tuya"}
+
+    def connect_with_authorization_code(self, code: str) -> Dict[str, Any]:
+        """Exchange an OAuth 2.0 authorization code for an access token."""
+        previous_scheme = self._resolved_auth_scheme
+        self.token_info = None
+        self._resolved_auth_scheme = "app"
+        response = self.get(TO_B_TOKEN_API, {"grant_type": 2, "code": code})
+        if response and response.get("success"):
+            self.token_info = TuyaTokenInfo(response)
             return response
-
-        # Cache token info.
-        self.token_info = TuyaTokenInfo(response)
-
+        self._resolved_auth_scheme = previous_scheme
         return response
+
+    def restore_token(self, token_response: Dict[str, Any]) -> None:
+        """Restore an already-issued token response into the current client."""
+        self.token_info = TuyaTokenInfo(token_response)
+        if self._resolved_auth_scheme is None:
+            self._resolved_auth_scheme = "app"
 
     def is_connect(self) -> bool:
         """Is connect to tuya cloud."""
@@ -191,15 +250,23 @@ class TuyaOpenAPI:
         if self.token_info:
             access_token = self.token_info.access_token
 
-        sign, t = self._calculate_sign(method, path, params, body)
+        sign, t, extra_headers = self._calculate_sign(
+            method,
+            path,
+            params,
+            body,
+            auth_scheme=self.resolved_auth_scheme,
+        )
         headers = {
             "client_id": self.access_id,
             "sign": sign,
             "sign_method": "HMAC-SHA256",
-            "access_token": access_token,
             "t": str(t),
             "lang": self.lang,
         }
+        if access_token:
+            headers["access_token"] = access_token
+        headers.update(extra_headers)
 
         headers["dev_lang"] = "python"
         headers["dev_version"] = VERSION

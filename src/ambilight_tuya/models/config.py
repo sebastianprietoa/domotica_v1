@@ -8,6 +8,8 @@ class TuyaCredentials:
     access_id: str
     access_key: str
     api_endpoint: str
+    auth_scheme: str = "auto"
+    app_identifier: str | None = None
     mq_endpoint: str | None = None
     default_device_id: str | None = None
 

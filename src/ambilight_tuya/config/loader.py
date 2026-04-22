@@ -120,6 +120,8 @@ def load_tuya_credentials() -> TuyaCredentials:
         access_id=_require_env("TUYA_ACCESS_ID"),
         access_key=_require_env("TUYA_ACCESS_KEY"),
         api_endpoint=_require_env("TUYA_API_ENDPOINT"),
+        auth_scheme=os.getenv("TUYA_AUTH_SCHEME", "auto").strip().lower() or "auto",
+        app_identifier=os.getenv("TUYA_APP_IDENTIFIER", "com.sebastianprietoa.ambilight.localhost").strip() or None,
         mq_endpoint=os.getenv("TUYA_MQ_ENDPOINT") or None,
         default_device_id=os.getenv("TUYA_DEFAULT_DEVICE_ID") or None,
     )
