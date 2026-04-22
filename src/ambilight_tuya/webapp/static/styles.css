@@ -382,6 +382,12 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+.device-badge-stack {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .device-actions {
   justify-content: stretch;
 }
@@ -392,6 +398,10 @@ button:disabled {
 
 .device-actions .button-off {
   flex-basis: 96px;
+}
+
+.device-actions .button-ghost[data-device-remove] {
+  flex-basis: 100%;
 }
 
 .device-color-panel {
@@ -466,6 +476,11 @@ button:disabled {
   overflow: hidden;
 }
 
+.drawer-inline {
+  margin-top: 0;
+  margin-bottom: 18px;
+}
+
 .drawer summary {
   display: flex;
   justify-content: space-between;
@@ -499,6 +514,11 @@ button:disabled {
   display: grid;
   gap: 12px;
   margin: 0 0 14px;
+}
+
+.catalog-form {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: end;
 }
 
 label {

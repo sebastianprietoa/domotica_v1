@@ -47,6 +47,34 @@
         </div>
       </section>
 
+      <details class="drawer drawer-inline">
+        <summary>
+          <span>Known device catalog</span>
+          <span class="drawer-hint">Save device IDs locally when Tuya discovery is blocked</span>
+        </summary>
+        <div class="drawer-body">
+          <section class="panel panel-subtle">
+            <div class="panel-toolbar">
+              <div>
+                <h3>Register a device manually</h3>
+                <p class="panel-copy">These cards are stored only in your browser and still use the same backend control routes.</p>
+              </div>
+            </div>
+            <form id="known-device-form" class="stack-form catalog-form">
+              <label>Device name <input name="name" placeholder="Living 4" required></label>
+              <label>Device ID <input name="device_id" placeholder="eb1f8a..." required></label>
+              <label>Type label <input name="type_label" placeholder="RGB light | Switch | Socket"></label>
+              <label class="checkbox"><input name="is_rgb_capable" type="checkbox"> RGB capable</label>
+              <div class="actions">
+                <button type="submit">Save device</button>
+                <button type="button" class="button-secondary" data-action="load-known-devices">Load saved devices</button>
+              </div>
+            </form>
+            <pre id="known-device-output">No saved devices yet.</pre>
+          </section>
+        </div>
+      </details>
+
       <section class="feedback-row">
         <div class="feedback-banner is-hidden" id="global-feedback" role="status"></div>
       </section>
