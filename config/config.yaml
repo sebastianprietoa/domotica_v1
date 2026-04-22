@@ -1,0 +1,48 @@
+capture:
+  monitor_index: 1
+  downsample: 4
+  target_fps: 10
+
+extraction:
+  strategy: average
+  min_change: 8.0
+  zones:
+    - name: left
+      x: 0.0
+      y: 0.0
+      width: 0.33
+      height: 1.0
+    - name: center
+      x: 0.33
+      y: 0.0
+      width: 0.34
+      height: 1.0
+    - name: right
+      x: 0.67
+      y: 0.0
+      width: 0.33
+      height: 1.0
+
+smoothing:
+  alpha: 0.35
+  min_update_interval_ms: 150
+  min_color_delta: 10.0
+
+tuya:
+  command_profiles:
+    default:
+      power_code: switch_led
+      color_mode_code: work_mode
+      color_mode_value: colour
+      color_data_code: colour_data_v2
+
+mapping:
+  - zone: left
+    device_ids: []
+    profile: default
+  - zone: center
+    device_ids: []
+    profile: default
+  - zone: right
+    device_ids: []
+    profile: default

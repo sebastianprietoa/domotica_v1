@@ -1,67 +1,194 @@
-# tuya-connector-python
+# Ambilight Tuya for PC
 
-![PyPI](https://img.shields.io/pypi/v/tuya-connector-python)
+Aplicacion local para Windows que captura la pantalla principal, extrae colores por zonas y sincroniza una o varias luces RGB Tuya detras del monitor.
 
-![PyPI - Downloads](https://img.shields.io/pypi/dm/tuya-connector-python)
+## Que reutiliza este repo
 
-![PyPI - Python Version](https://img.shields.io/pypi/pyversions/tuya-connector-python)
+Este proyecto conserva el SDK cloud original de Tuya en `tuya_connector/` y lo encapsula dentro de una arquitectura nueva en `src/ambilight_tuya/`.
 
-The `tuya-connector-python` SDK is designed to support openAPIs and Pulsar messages provided by Tuya. Before using this SDK, you can see [Quick Start](https://developer.tuya.com/en/docs/iot/quick-start1?id=K95ztz9u9t89n) on the Tuya Developer website to learn more about Cloud Development Platform.
+Se reutiliza:
 
-## Install
+- `tuya_connector.openapi.TuyaOpenAPI` para autenticacion y llamadas HTTP
+- `tuya_connector.openlogging` para logs filtrados del SDK
+- la base del repo original como proveedor del cliente Tuya
 
-`pip3 install tuya-connector-python`
+Se reemplaza:
 
-## Get started
+- ejemplos inseguros con secretos hardcodeados
+- organizacion del repo orientada al SDK
+- scripts de prueba acoplados
+- configuracion directa en codigo
 
-1. [Sign up](https://auth.tuya.com/register?from=https%3A%2F%2Fiot.tuya.com%2F) for Tuya developer account.
+## Estructura
 
-2. [Create a cloud project](https://iot.tuya.com/cloud/). See the [tutorial](https://developer.tuya.com/en/docs/iot/device-control-practice?id=Kat1jdeul4uf8) for how to get the authorization key and other necessary parameters.
+```text
+.
+|-- config/
+|   `-- config.yaml
+|-- docs/
+|   `-- architecture.md
+|-- legacy/
+|   `-- example/
+|-- scripts/
+|   |-- get_device_status.py
+|   |-- list_devices.py
+|   |-- run_sync.py
+|   |-- screen_sample_test.py
+|   `-- set_fixed_color.py
+|-- src/
+|   `-- ambilight_tuya/
+|       |-- color_extractor/
+|       |-- config/
+|       |-- device_mapper/
+|       |-- models/
+|       |-- screen_capture/
+|       |-- smoothing/
+|       |-- sync_engine/
+|       |-- tuya_client/
+|       `-- utils/
+|-- tests/
+|-- .env.example
+`-- tuya_connector/
+```
 
-3. A quick example is as follows:
+## Requisitos
 
-   ``` python
-   from tuya_connector import (
-   	TuyaOpenAPI,
-   	TuyaOpenPulsar,
-   	TuyaCloudPulsarTopic,
-   )
-   
-   ACCESS_ID = "your-access-id"
-   ACCESS_KEY = "your-access-key"
-   API_ENDPOINT = "https://openapi.tuyacn.com"
-   MQ_ENDPOINT = "wss://mqe.tuyacn.com:8285/"
-   
-   # Init OpenAPI and connect
-   openapi = TuyaOpenAPI(API_ENDPOINT, ACCESS_ID, ACCESS_KEY)
-   openapi.connect()
-   
-   # Call any API from Tuya
-   response = openapi.get("/v1.0/statistics-datas-survey", dict())
-   
-   # Init Message Queue
-   open_pulsar = TuyaOpenPulsar(
-   	ACCESS_ID, ACCESS_KEY, MQ_ENDPOINT, TuyaCloudPulsarTopic.PROD
-   )
-   # Add Message Queue listener
-   open_pulsar.add_message_listener(lambda msg: print(f"---\nexample receive: {msg}"))
-   
-   # Start Message Queue
-   open_pulsar.start()
-   
-   input()
-   # Stop Message Queue
-   open_pulsar.stop()
-   ```
+- Python 3.11+
+- Windows para la captura en tiempo real recomendada
+- un proyecto cloud de Tuya con dispositivos vinculados
 
-## OpenAPI reference
+## Instalacion
 
-Tuya opens up a variety of APIs covering scenarios such as device pairing, asset management, and device control. You can call APIs according to [API reference](https://developer.tuya.com/en/docs/cloud/?_source=github) to create IoT applications.
+1. Crea y activa un entorno virtual.
+2. Instala dependencias:
 
-## Feedback
+```powershell
+pip install -r requirements.txt
+pip install -e .
+```
 
-If you have any questions, please provide feedback via **Github Issue** or [Technical Ticket](https://service.console.tuya.com/).
+3. Copia `.env.example` a `.env` y completa tus credenciales.
+4. Revisa `config/config.yaml` y ajusta monitor, zonas, smoothing y mapeo de luces.
 
-## License
+## Configuracion segura
 
-The `tuya-connector-python` SDK is available under the MIT license. For more information, see the [LICENSE](./LICENSE) file.
+Las credenciales viven en `.env`.
+
+Variables requeridas:
+
+- `TUYA_ACCESS_ID`
+- `TUYA_ACCESS_KEY`
+- `TUYA_API_ENDPOINT`
+
+Variables opcionales:
+
+- `TUYA_MQ_ENDPOINT`
+- `TUYA_DEFAULT_DEVICE_ID`
+- `AMBILIGHT_CONFIG_PATH`
+- `AMBILIGHT_LOG_LEVEL`
+
+Ejemplo rapido:
+
+```env
+TUYA_ACCESS_ID=replace-me
+TUYA_ACCESS_KEY=replace-me
+TUYA_API_ENDPOINT=https://openapi.tuyaus.com
+TUYA_MQ_ENDPOINT=wss://mqe.tuyaus.com:8285/
+TUYA_DEFAULT_DEVICE_ID=
+AMBILIGHT_CONFIG_PATH=config/config.yaml
+AMBILIGHT_LOG_LEVEL=INFO
+```
+
+## Descubrir dispositivos Tuya
+
+Lista los dispositivos disponibles en tu proyecto:
+
+```powershell
+python scripts/list_devices.py
+```
+
+Consulta el estado de un dispositivo:
+
+```powershell
+python scripts/get_device_status.py --device-id <device-id>
+```
+
+## Probar color fijo
+
+Envia un color RGB fijo a una luz:
+
+```powershell
+python scripts/set_fixed_color.py --device-id <device-id> --rgb 255,80,40
+```
+
+Tambien puedes usar `--zone left` para resolver el dispositivo desde el `config.yaml`.
+
+## Probar captura de pantalla
+
+Captura un frame del monitor configurado y muestra el muestreo por zonas:
+
+```powershell
+python scripts/screen_sample_test.py --save-preview docs/sample_frame.png
+```
+
+## Ejecutar modo sync
+
+Arranca el loop de sincronizacion:
+
+```powershell
+python scripts/run_sync.py
+```
+
+Opciones utiles:
+
+- `--duration 30` para una prueba temporal
+- `--dry-run` para ver colores sin enviar comandos
+- `--monitor-index 2` para sobreescribir el monitor configurado
+
+## Diferencias entre dispositivos Tuya
+
+No todas las luces Tuya exponen los mismos codigos. Algunas usan:
+
+- `switch_led`, `work_mode`, `colour_data_v2`
+- otras requieren DPs o codigos alternativos
+
+Por eso el proyecto soporta perfiles de comando por dispositivo en `config/config.yaml`, con fallback configurable.
+
+## Testing
+
+Ejecuta tests unitarios con:
+
+```powershell
+pytest
+```
+
+Cobertura actual:
+
+- extraccion de color
+- smoothing
+- mapeo de dispositivos
+- cliente Tuya con mock
+
+## Legacy y seguridad
+
+Los notebooks y ejemplos originales fueron movidos a `legacy/example/` y saneados. Se conservan solo como referencia historica; no deben usarse en produccion.
+
+## Estado actual
+
+Ya queda funcional:
+
+- carga segura de credenciales
+- cliente Tuya desacoplado
+- captura de pantalla por monitor
+- extraccion de color promedio o dominante por zonas
+- smoothing basico configurable
+- mapping zona -> dispositivos
+- scripts operativos minimos
+- tests unitarios base
+
+Pendiente para siguientes iteraciones:
+
+- UI de escritorio
+- calibracion visual avanzada
+- streaming de captura mas optimizado
+- soporte por modelo para mas formatos de color

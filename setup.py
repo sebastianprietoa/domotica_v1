@@ -1,57 +1,44 @@
 #!/usr/bin/env python
 # -*- coding: UTF-8 -*-
 
-# from distutils.core import setup
-from setuptools import setup, find_packages
+from pathlib import Path
+
+from setuptools import find_packages, setup
+
 from tuya_connector import __version__
 
-tests_require = []
+
+ROOT = Path(__file__).parent
 
 
-def requirements():
-    with open('requirements.txt', 'r') as fileobj:
-        requirements = [line.strip() for line in fileobj]
-        return requirements
-
-
-with open("README.md", "r", encoding="utf-8") as fh:
-    doc_long_description = fh.read()
+def requirements() -> list[str]:
+    return [line.strip() for line in (ROOT / "requirements.txt").read_text().splitlines() if line.strip()]
 
 
 setup(
-    name='tuya-connector-python',
-    url='https://github.com/tuya/tuya-connector-python',
-    author="Tuya Inc.",
-    author_email='developer@tuya.com',
-    keywords='tuya iot cloud sdk python',
-    long_description=doc_long_description,
+    name="ambilight-tuya-pc",
+    version=__version__,
+    url="https://github.com/sebastianprietoa/domotica_v1",
+    author="sebastianprietoa",
+    author_email="opensource@example.com",
+    keywords="tuya ambilight rgb windows automation",
+    description="Clean Ambilight architecture for Tuya RGB lights on Windows.",
+    long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
-    description='The `tuya-connector-python` SDK is desinged to support open APIs and Pulsar Messages provided by Tuya.',
-    license='MIT',
+    license="MIT",
     project_urls={
-        "Bug Tracker": "https://github.com/tuya/tuya-connector-python/issues",
-        "Changes": "https://github.com/tuya/tuya-connector-python/wiki/Tuya-Connector-Python-Release-Notes"
+        "Source": "https://github.com/sebastianprietoa/domotica_v1",
     },
     classifiers=[
-        'Development Status :: 4 - Beta',
-        'License :: OSI Approved :: MIT License',
-        'Operating System :: OS Independent',
-        'Topic :: Software Development',
-        'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
-        'Programming Language :: Python :: 3.9',
-        'Programming Language :: Python :: Implementation :: PyPy'
+        "Development Status :: 3 - Alpha",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: Microsoft :: Windows",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.11",
+        "Topic :: Home Automation",
     ],
-
-    version=__version__,
     install_requires=requirements(),
-    tests_require=tests_require,
-    test_suite='runtests.runtests',
-    extras_require={'test': tests_require},
-    entry_points={'nose.plugins': []},
-    packages=find_packages(),
-    python_requires='>=3.0',
-
+    packages=find_packages(where="src") + ["tuya_connector"],
+    package_dir={"": "src", "tuya_connector": "tuya_connector"},
+    python_requires=">=3.11",
 )
