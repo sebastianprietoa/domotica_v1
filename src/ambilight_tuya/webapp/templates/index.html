@@ -3,99 +3,166 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Ambilight Tuya Localhost v2026.04.22-4</title>
+    <title>Ambilight Tuya Localhost v2026.04.22-5</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   </head>
   <body>
-    <main class="layout">
-      <section class="hero">
-        <p class="eyebrow">Localhost Control</p>
-        <h1>Ambilight Tuya Dashboard</h1>
-        <p class="build-badge">Version UI: v2026.04.22-4</p>
-        <p class="lede">Manipula discovery, estado, color fijo, muestreo de pantalla y sync en tiempo real desde tu navegador.</p>
-      </section>
-
-      <section class="panel">
-        <h2>Diagnóstico Tuya</h2>
-        <div class="actions">
-          <button type="button" data-action="refresh-debug">Actualizar logs</button>
-          <button type="button" data-action="clear-debug">Limpiar logs</button>
+    <div class="app-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Smart home dashboard</p>
+          <h1>Ambilight Tuya Control Center</h1>
+          <p class="lede">
+            Controla luces, switches y dispositivos Tuya desde una vista unificada con enfoque en estado,
+            energia y acciones rapidas.
+          </p>
         </div>
-        <pre id="debug-output">Sin logs todavía.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Estado</h2>
-        <button data-action="refresh-status">Actualizar estado</button>
-        <pre id="status-output">Pulsa "Actualizar estado" para cargar estado y monitores.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Dispositivos</h2>
-        <button data-action="list-devices">Listar dispositivos</button>
-        <pre id="devices-output">Sin datos.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Estado de dispositivo</h2>
-        <form id="device-status-form">
-          <label>Device ID <input name="device_id" placeholder="tuya-device-id" required></label>
-          <button type="submit">Consultar</button>
-        </form>
-        <pre id="device-status-output">Sin datos.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Power</h2>
-        <form id="power-form">
-          <label>Device ID <input name="device_id" placeholder="Opcional si usas zona"></label>
-          <label>Zona <input name="zone" placeholder="left | center | right"></label>
-          <label>Estado
-            <select name="state">
-              <option value="on">On</option>
-              <option value="off">Off</option>
-            </select>
-          </label>
-          <button type="submit">Aplicar power</button>
-        </form>
-        <pre id="power-output">Sin datos.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Color fijo</h2>
-        <form id="fixed-color-form">
-          <label>Device ID <input name="device_id" placeholder="Opcional si usas zona"></label>
-          <label>Zona <input name="zone" placeholder="left | center | right"></label>
-          <label>RGB <input name="rgb" value="255,80,40" required></label>
-          <button type="submit">Enviar color</button>
-        </form>
-        <pre id="fixed-color-output">Sin datos.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Muestreo de pantalla</h2>
-        <form id="sample-form">
-          <label>Monitor index <input name="monitor_index" type="number" min="1" placeholder="Opcional"></label>
-          <button type="submit">Capturar muestra</button>
-        </form>
-        <pre id="sample-output">Sin datos.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Sync engine</h2>
-        <form id="sync-form">
-          <label>Duración (s) <input name="duration" type="number" min="0" step="0.1" placeholder="Vacío = indefinido"></label>
-          <label>Monitor index <input name="monitor_index" type="number" min="1" placeholder="Opcional"></label>
-          <label class="checkbox"><input name="dry_run" type="checkbox" checked> Dry run</label>
-          <div class="actions">
-            <button type="submit">Iniciar sync</button>
-            <button type="button" data-action="stop-sync">Detener sync</button>
+        <div class="hero-meta">
+          <span class="build-badge">Version UI: v2026.04.22-5</span>
+          <div class="hero-stats">
+            <div class="hero-stat">
+              <span class="hero-stat-label">Devices</span>
+              <strong id="device-count">0</strong>
+            </div>
+            <div class="hero-stat">
+              <span class="hero-stat-label">Online</span>
+              <strong id="online-count">0</strong>
+            </div>
+            <div class="hero-stat">
+              <span class="hero-stat-label">RGB</span>
+              <strong id="rgb-count">0</strong>
+            </div>
           </div>
-        </form>
-        <pre id="sync-output">Sin datos.</pre>
+        </div>
+      </header>
+
+      <section class="action-bar panel">
+        <div class="action-group">
+          <button type="button" data-action="refresh-devices">Refresh devices</button>
+          <button type="button" class="button-secondary" data-action="refresh-status">Refresh status</button>
+        </div>
+        <div class="action-meta">
+          <span class="pill" id="last-refresh-pill">Never refreshed</span>
+          <span class="pill pill-muted" id="oauth-pill">OAuth idle</span>
+        </div>
       </section>
-    </main>
+
+      <section class="feedback-row">
+        <div class="feedback-banner is-hidden" id="global-feedback" role="status"></div>
+      </section>
+
+      <section class="section-head">
+        <div>
+          <p class="section-kicker">Main controls</p>
+          <h2>Devices</h2>
+        </div>
+        <p class="section-copy">
+          Usa las tarjetas para ver el estado actual, alternar energia y aplicar colores en equipos RGB.
+        </p>
+      </section>
+
+      <section class="device-grid" id="device-grid" aria-live="polite">
+        <article class="empty-state">
+          <h3>No devices loaded yet</h3>
+          <p>Haz clic en <strong>Refresh devices</strong> para traer los dispositivos desde Tuya Cloud.</p>
+        </article>
+      </section>
+
+      <details class="drawer">
+        <summary>
+          <span>Advanced controls</span>
+          <span class="drawer-hint">Manual tools, sync and screen sampling</span>
+        </summary>
+        <div class="drawer-body drawer-grid">
+          <section class="panel panel-subtle">
+            <h3>Manual status lookup</h3>
+            <form id="device-status-form" class="stack-form">
+              <label>Device ID <input name="device_id" placeholder="tuya-device-id" required></label>
+              <button type="submit">Check status</button>
+            </form>
+            <pre id="device-status-output">No manual status query yet.</pre>
+          </section>
+
+          <section class="panel panel-subtle">
+            <h3>Manual power control</h3>
+            <form id="power-form" class="stack-form">
+              <label>Device ID <input name="device_id" placeholder="Optional if using zone"></label>
+              <label>Zone <input name="zone" placeholder="left | center | right"></label>
+              <label>State
+                <select name="state">
+                  <option value="on">On</option>
+                  <option value="off">Off</option>
+                </select>
+              </label>
+              <button type="submit">Apply power</button>
+            </form>
+            <pre id="power-output">No power command sent yet.</pre>
+          </section>
+
+          <section class="panel panel-subtle">
+            <h3>Manual fixed color</h3>
+            <form id="fixed-color-form" class="stack-form">
+              <label>Device ID <input name="device_id" placeholder="Optional if using zone"></label>
+              <label>Zone <input name="zone" placeholder="left | center | right"></label>
+              <label>RGB <input name="rgb" value="255,80,40" required></label>
+              <button type="submit">Send color</button>
+            </form>
+            <pre id="fixed-color-output">No color command sent yet.</pre>
+          </section>
+
+          <section class="panel panel-subtle">
+            <h3>Screen sample</h3>
+            <form id="sample-form" class="stack-form">
+              <label>Monitor index <input name="monitor_index" type="number" min="1" placeholder="Optional"></label>
+              <button type="submit">Capture sample</button>
+            </form>
+            <pre id="sample-output">No sample captured yet.</pre>
+          </section>
+
+          <section class="panel panel-subtle">
+            <h3>Sync engine</h3>
+            <form id="sync-form" class="stack-form">
+              <label>Duration (s) <input name="duration" type="number" min="0" step="0.1" placeholder="Blank = indefinite"></label>
+              <label>Monitor index <input name="monitor_index" type="number" min="1" placeholder="Optional"></label>
+              <label class="checkbox"><input name="dry_run" type="checkbox" checked> Dry run</label>
+              <div class="actions">
+                <button type="submit">Start sync</button>
+                <button type="button" class="button-secondary" data-action="stop-sync">Stop sync</button>
+              </div>
+            </form>
+            <pre id="sync-output">Sync engine idle.</pre>
+          </section>
+
+          <section class="panel panel-subtle">
+            <h3>System status</h3>
+            <pre id="status-output">Press refresh status to load system state.</pre>
+          </section>
+        </div>
+      </details>
+
+      <details class="drawer">
+        <summary>
+          <span>Diagnostics</span>
+          <span class="drawer-hint">Tuya auth, logs and troubleshooting context</span>
+        </summary>
+        <div class="drawer-body">
+          <section class="panel panel-subtle">
+            <div class="panel-toolbar">
+              <div>
+                <h3>Tuya diagnostics</h3>
+                <p class="panel-copy">Use this when you need screenshots of auth attempts, request codes or device command failures.</p>
+              </div>
+              <div class="actions">
+                <button type="button" data-action="refresh-debug">Refresh logs</button>
+                <button type="button" class="button-secondary" data-action="clear-debug">Clear logs</button>
+              </div>
+            </div>
+            <pre id="debug-output">No diagnostics yet.</pre>
+          </section>
+        </div>
+      </details>
+    </div>
 
     <script src="{{ url_for('static', filename='app.js') }}"></script>
   </body>
-  </html>
+</html>

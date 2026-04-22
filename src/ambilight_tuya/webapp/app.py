@@ -18,6 +18,20 @@ from ambilight_tuya.sync_engine import AmbilightSyncEngine
 from ambilight_tuya.tuya_client import TuyaClient, TuyaApiError
 from ambilight_tuya.utils import configure_logging
 
+POWER_CODES = ("switch_led", "switch", "switch_1")
+RGB_STATUS_CODES = ("work_mode", "colour_data", "colour_data_v2", "bright_value_v2", "temp_value_v2")
+CATEGORY_LABELS = {
+    "dj": "RGB light",
+    "dd": "Light strip",
+    "kg": "Switch",
+    "cz": "Socket",
+    "pc": "Power strip",
+    "fs": "Fan",
+    "kt": "Air conditioner",
+    "qn": "Heater",
+    "wk": "Thermostat",
+}
+
 
 class SyncSession:
     def __init__(self) -> None:
@@ -161,6 +175,88 @@ def _serialize_samples(samples: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _short_device_id(device_id: str) -> str:
+    if len(device_id) <= 10:
+        return device_id
+    return f"{device_id[:6]}...{device_id[-4:]}"
+
+
+def _status_items_to_map(status_items: list[dict[str, Any]] | None) -> dict[str, Any]:
+    if not status_items:
+        return {}
+    return {
+        item.get("code"): item.get("value")
+        for item in status_items
+        if item.get("code")
+    }
+
+
+def _derive_power_state(status_map: dict[str, Any]) -> str:
+    for code in POWER_CODES:
+        if code in status_map:
+            return "on" if bool(status_map[code]) else "off"
+    return "unknown"
+
+
+def _guess_rgb_capability(raw_device: dict[str, Any], status_map: dict[str, Any]) -> bool:
+    codes = set(status_map.keys())
+    if any(code in codes for code in RGB_STATUS_CODES):
+        return True
+    category = str(raw_device.get("category", "")).lower()
+    name = str(raw_device.get("name", "")).lower()
+    product_name = str(raw_device.get("product_name", "")).lower()
+    rgb_hints = ("rgb", "colour", "color", "bulb", "light", "strip", "luz")
+    if category in {"dj", "dd"}:
+        return True
+    return any(hint in f"{name} {product_name}" for hint in rgb_hints)
+
+
+def _normalize_device_record(raw_device: dict[str, Any], status_map: dict[str, Any] | None = None) -> dict[str, Any]:
+    resolved_status_map = status_map or _status_items_to_map(raw_device.get("status"))
+    category = str(raw_device.get("category", "")).lower()
+    name = (
+        str(raw_device.get("name") or raw_device.get("custom_name") or "").strip()
+        or f"Device {_short_device_id(str(raw_device.get('id', 'unknown')))}"
+    )
+    online_value = raw_device.get("online")
+    if online_value is None and "online" in resolved_status_map:
+        online_value = resolved_status_map.get("online")
+    if isinstance(online_value, bool):
+        online = online_value
+    else:
+        online = None
+    power_state = _derive_power_state(resolved_status_map)
+    is_rgb_capable = _guess_rgb_capability(raw_device, resolved_status_map)
+    product_name = str(raw_device.get("product_name") or "").strip()
+    return {
+        "id": str(raw_device.get("id", "")).strip(),
+        "short_id": _short_device_id(str(raw_device.get("id", "")).strip()),
+        "name": name,
+        "category": category or "unknown",
+        "type_label": CATEGORY_LABELS.get(category, product_name or "Tuya device"),
+        "product_name": product_name,
+        "online": online,
+        "reachability_label": "Online" if online is True else "Offline" if online is False else "Unknown",
+        "power_state": power_state,
+        "state_label": power_state.title(),
+        "is_rgb_capable": is_rgb_capable,
+        "supports_color": is_rgb_capable,
+        "status_map": resolved_status_map,
+        "raw": raw_device,
+    }
+
+
+def _serialize_device_status(status) -> dict[str, Any]:
+    payload = asdict(status)
+    status_map = dict(status.raw.get("status_map", {}))
+    payload["status_map"] = status_map
+    payload["power_state"] = status.raw.get("power_state", _derive_power_state(status_map))
+    payload["reachability_label"] = "Online" if status.online else "Offline"
+    payload["state_label"] = payload["power_state"].title()
+    payload["is_rgb_capable"] = _guess_rgb_capability({"id": status.device_id}, status_map)
+    return payload
+
+
 def create_app() -> Flask:
     load_dotenv()
     configure_logging()
@@ -230,18 +326,23 @@ def create_app() -> Flask:
     def api_list_devices():
         client = _get_tuya_client(prefer_user_oauth=True)
         try:
-            devices = client.list_devices()
+            raw_devices = client.list_devices()
         except Exception as exc:
             _record_debug(
                 "tuya.list_devices.error",
                 {"error": str(exc), "tuya": client.debug_snapshot()},
             )
             raise
+        devices = [
+            _normalize_device_record(raw_device)
+            for raw_device in raw_devices
+        ]
+        devices.sort(key=lambda item: (item["name"].lower(), item["id"]))
         _record_debug(
             "tuya.list_devices.success",
             {"device_count": len(devices), "tuya": client.debug_snapshot()},
         )
-        return jsonify({"devices": devices})
+        return jsonify({"devices": devices, "count": len(devices)})
 
     @app.post("/api/get-device-status")
     def api_get_device_status():
@@ -262,7 +363,7 @@ def create_app() -> Flask:
             "tuya.get_device_status.success",
             {"device_id": device_id, "tuya": client.debug_snapshot()},
         )
-        return jsonify(asdict(status))
+        return jsonify(_serialize_device_status(status))
 
     @app.post("/api/set-fixed-color")
     def api_set_fixed_color():

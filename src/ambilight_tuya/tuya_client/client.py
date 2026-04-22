@@ -10,6 +10,8 @@ from tuya_connector import TuyaOpenAPI
 
 logger = logging.getLogger(__name__)
 
+POWER_STATUS_CODES = ("switch_led", "switch", "switch_1")
+
 
 class OpenApiProtocol(Protocol):
     token_info: Any
@@ -130,8 +132,33 @@ class TuyaClient:
         response = self._api.get(path)
         self._require_success(response)
         result = response.get("result", [])
-        online = any(item.get("value") for item in result if item.get("code") in {"switch_led", "switch", "online"})
-        return DeviceStatus(device_id=device_id, online=bool(online), raw={"status": result})
+        status_map = {
+            item.get("code"): item.get("value")
+            for item in result
+            if item.get("code")
+        }
+        online_value = status_map.get("online")
+        if isinstance(online_value, bool):
+            online = online_value
+        else:
+            online = True
+        power_state = next(
+            (
+                "on" if bool(status_map[code]) else "off"
+                for code in POWER_STATUS_CODES
+                if code in status_map
+            ),
+            "unknown",
+        )
+        return DeviceStatus(
+            device_id=device_id,
+            online=bool(online),
+            raw={
+                "status": result,
+                "status_map": status_map,
+                "power_state": power_state,
+            },
+        )
 
     def send_commands(self, device_id: str, commands: list[dict[str, Any]]) -> dict[str, Any]:
         self._ensure_connected()

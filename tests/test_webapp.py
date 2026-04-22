@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ambilight_tuya.models import DeviceStatus
 from ambilight_tuya.models import TuyaCredentials
 from ambilight_tuya.webapp.app import _parse_rgb, create_app
 
@@ -43,6 +44,107 @@ def test_debug_logs_endpoint_is_available() -> None:
     assert response.status_code == 200
     payload = response.get_json()
     assert "entries" in payload
+
+
+class FakeDashboardClient:
+    def __init__(self, credentials) -> None:
+        self.credentials = credentials
+
+    def debug_snapshot(self) -> dict:
+        return {
+            "api_endpoint": self.credentials.api_endpoint,
+            "configured_auth_scheme": self.credentials.auth_scheme,
+            "resolved_auth_scheme": self.credentials.auth_scheme,
+            "app_identifier": self.credentials.app_identifier,
+            "client_id_suffix": self.credentials.access_id[-6:],
+            "connected": True,
+            "uid": "user-1",
+            "last_connect_attempts": [],
+            "last_request": None,
+        }
+
+    def list_devices(self) -> list[dict]:
+        return [
+            {
+                "id": "device-1",
+                "name": "Living 4",
+                "category": "dj",
+                "product_name": "Smart Bulb",
+                "online": True,
+                "status": [{"code": "switch_led", "value": True}],
+            }
+        ]
+
+    def get_device_status(self, device_id: str) -> DeviceStatus:
+        return DeviceStatus(
+            device_id=device_id,
+            online=True,
+            raw={
+                "status": [
+                    {"code": "switch_led", "value": True},
+                    {"code": "work_mode", "value": "colour"},
+                ],
+                "status_map": {
+                    "switch_led": True,
+                    "work_mode": "colour",
+                },
+                "power_state": "on",
+            },
+        )
+
+
+def test_list_devices_returns_normalized_cards(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.TuyaClient",
+        FakeDashboardClient,
+    )
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.load_tuya_credentials",
+        lambda: TuyaCredentials(
+            access_id="client-id-123456",
+            access_key="secret",
+            api_endpoint="https://example.com",
+            auth_scheme="cloud",
+        ),
+    )
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post("/api/list-devices", json={})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["count"] == 1
+    assert payload["devices"][0]["name"] == "Living 4"
+    assert payload["devices"][0]["is_rgb_capable"] is True
+    assert payload["devices"][0]["power_state"] == "on"
+
+
+def test_get_device_status_returns_friendly_fields(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.TuyaClient",
+        FakeDashboardClient,
+    )
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.load_tuya_credentials",
+        lambda: TuyaCredentials(
+            access_id="client-id-123456",
+            access_key="secret",
+            api_endpoint="https://example.com",
+            auth_scheme="cloud",
+        ),
+    )
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post("/api/get-device-status", json={"device_id": "device-1"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["device_id"] == "device-1"
+    assert payload["power_state"] == "on"
+    assert payload["is_rgb_capable"] is True
+    assert payload["reachability_label"] == "Online"
 
 
 def test_list_devices_requires_oauth_for_app_authorization(monkeypatch) -> None:
