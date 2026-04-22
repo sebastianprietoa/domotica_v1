@@ -1,0 +1,57 @@
+# AGENTS.md
+
+## Objetivo
+
+Convertir este repositorio base de Tuya en una aplicación modular de Ambilight para PC con Python.
+
+## Prioridades
+
+1. Seguridad de credenciales
+2. Reutilizar correctamente la base existente
+3. Arquitectura limpia y extensible
+4. Baja latencia razonable
+5. Buen debugging y documentación
+
+## Reglas
+
+* Nunca dejar secretos hardcodeados en código fuente, notebooks o scripts.
+* Mover secretos a `.env`.
+* Crear `.env.example` con placeholders.
+* Si encuentras código legacy útil, encapsúlalo o muévelo a `legacy/`.
+* Mantener una separación clara entre:
+
+  * integración Tuya
+  * captura de pantalla
+  * extracción de color
+  * smoothing
+  * motor de sincronización
+  * configuración
+* No asumir que todos los dispositivos Tuya usan exactamente los mismos DPs.
+* Diseñar el cliente Tuya para soportar comandos estándar y configuraciones específicas por dispositivo.
+* Agregar tests unitarios para la lógica pura.
+* Documentar cualquier limitación detectada.
+
+## Estilo de implementación
+
+* Python 3.11+
+* código legible
+* funciones pequeñas
+* tipado cuando aporte claridad
+* logging útil
+* evitar complejidad innecesaria
+
+## Validaciones mínimas
+
+* probar importaciones
+* probar scripts mínimos
+* correr tests unitarios
+* dejar instrucciones claras en README
+
+## Entregables
+
+* repo refactorizado
+* scripts funcionales
+* README actualizado
+* config segura
+* tests básicos
+* resumen de reutilización del código original
