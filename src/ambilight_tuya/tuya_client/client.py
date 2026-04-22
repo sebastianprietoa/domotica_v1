@@ -53,12 +53,19 @@ class TuyaClient:
 
     def list_devices(self) -> list[dict[str, Any]]:
         self._ensure_connected()
+        project_response = self._api.get("/v1.0/expand/devices")
+        if project_response and project_response.get("success"):
+            return list(project_response.get("result", []))
+
         uid = getattr(self._api.token_info, "uid", "")
         if not uid:
-            raise TuyaApiError("Authenticated Tuya token does not expose a user uid")
-        response = self._api.get(f"/v1.0/users/{uid}/devices")
-        self._require_success(response)
-        return list(response.get("result", []))
+            raise TuyaApiError(
+                "Unable to list devices from project scope and authenticated token does not expose a user uid"
+            )
+
+        user_response = self._api.get(f"/v1.0/users/{uid}/devices")
+        self._require_success(user_response)
+        return list(user_response.get("result", []))
 
     def get_device_status(self, device_id: str) -> DeviceStatus:
         self._ensure_connected()
