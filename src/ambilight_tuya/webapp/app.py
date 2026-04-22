@@ -5,6 +5,7 @@ import os
 import threading
 from typing import Any
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 from ambilight_tuya.color_extractor import ColorExtractor
@@ -134,6 +135,7 @@ def _serialize_samples(samples: dict[str, Any]) -> dict[str, Any]:
 
 
 def create_app() -> Flask:
+    load_dotenv()
     configure_logging()
     app = Flask(__name__, template_folder="templates", static_folder="static")
     sync_session = SyncSession()
@@ -213,6 +215,35 @@ def create_app() -> Flask:
                 }
             )
         return jsonify({"zone": zone, "results": results})
+
+    @app.post("/api/set-power")
+    def api_set_power():
+        payload = request.get_json(silent=True) or {}
+        device_id = str(payload.get("device_id", "")).strip()
+        zone = str(payload.get("zone", "")).strip()
+        state_raw = str(payload.get("state", "")).strip().lower()
+        if state_raw not in {"on", "off"}:
+            raise ValueError("state must be 'on' or 'off'")
+        is_on = state_raw == "on"
+        _, app_config = load_app_config()
+        client = _get_tuya_client(prefer_user_oauth=True)
+        if device_id:
+            result = client.set_power_state(device_id, is_on, app_config.command_profiles["default"])
+            return jsonify({"device_id": device_id, "state": state_raw, "result": result})
+        if not zone:
+            raise ValueError("device_id or zone is required")
+        routing = DeviceMapper(app_config).resolve(zone)
+        if routing is None or not routing.device_ids:
+            raise ValueError(f"No devices configured for zone {zone}")
+        results = []
+        for resolved_device_id in routing.device_ids:
+            results.append(
+                {
+                    "device_id": resolved_device_id,
+                    "result": client.set_power_state(resolved_device_id, is_on, routing.profile),
+                }
+            )
+        return jsonify({"zone": zone, "state": state_raw, "results": results})
 
     @app.post("/api/screen-sample")
     def api_screen_sample():

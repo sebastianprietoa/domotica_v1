@@ -132,6 +132,11 @@ class TuyaClient:
         self._require_success(response)
         return response
 
+    def set_power_state(self, device_id: str, is_on: bool, profile: CommandProfile) -> dict[str, Any]:
+        command = {"code": profile.power_code, "value": bool(is_on)}
+        logger.debug("Sending power state %s to device %s", is_on, device_id)
+        return self.send_commands(device_id, [command])
+
     def set_fixed_color(self, device_id: str, color: RGBColor, profile: CommandProfile) -> dict[str, Any]:
         hsv = color.to_hsv().as_dict()
         commands = [

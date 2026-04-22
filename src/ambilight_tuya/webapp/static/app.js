@@ -75,6 +75,18 @@ bindForm("#device-status-form", async (form) => {
   }
 });
 
+bindForm("#power-form", async (form) => {
+  try {
+    writeOutput("#power-output", await postJson("/api/set-power", {
+      device_id: form.get("device_id"),
+      zone: form.get("zone"),
+      state: form.get("state"),
+    }));
+  } catch (error) {
+    writeOutput("#power-output", error.message);
+  }
+});
+
 bindForm("#fixed-color-form", async (form) => {
   try {
     writeOutput("#fixed-color-output", await postJson("/api/set-fixed-color", {

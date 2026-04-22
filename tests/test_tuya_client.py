@@ -106,3 +106,15 @@ def test_tuya_client_sets_color() -> None:
 
     assert client._api.commands[0][0] == "/v1.0/iot-03/devices/device-1/commands"
     assert client._api.commands[0][1]["commands"][0]["code"] == "switch_led"
+
+
+def test_tuya_client_sets_power() -> None:
+    client = TuyaClient(
+        TuyaCredentials("id", "key", "https://example.com"),
+        api_factory=FakeOpenAPI,
+    )
+
+    client.set_power_state("device-1", True, CommandProfile())
+
+    assert client._api.commands[0][0] == "/v1.0/iot-03/devices/device-1/commands"
+    assert client._api.commands[0][1]["commands"] == [{"code": "switch_led", "value": True}]

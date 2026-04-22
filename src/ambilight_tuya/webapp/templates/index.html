@@ -37,6 +37,22 @@
       </section>
 
       <section class="panel">
+        <h2>Power</h2>
+        <form id="power-form">
+          <label>Device ID <input name="device_id" placeholder="Opcional si usas zona"></label>
+          <label>Zona <input name="zone" placeholder="left | center | right"></label>
+          <label>Estado
+            <select name="state">
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <button type="submit">Aplicar power</button>
+        </form>
+        <pre id="power-output">Sin datos.</pre>
+      </section>
+
+      <section class="panel">
         <h2>Color fijo</h2>
         <form id="fixed-color-form">
           <label>Device ID <input name="device_id" placeholder="Opcional si usas zona"></label>

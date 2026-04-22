@@ -173,6 +173,7 @@ Desde ahi puedes:
 
 - listar dispositivos Tuya
 - consultar estado de un dispositivo
+- encender o apagar una luz por `device_id` o por zona
 - enviar un color fijo por `device_id` o por zona
 - capturar una muestra de pantalla
 - iniciar y detener el sync engine
@@ -183,6 +184,30 @@ Notas:
 - las acciones contra la nube si requieren `.env` configurado
 - el sync puede iniciarse en `dry-run` para validar colores sin tocar las luces
 - si usas `App Authorization`, primero completa el callback OAuth en Tuya y autoriza al usuario antes de listar dispositivos o controlar luces
+
+## Modo simple sin OEM app
+
+Si solo quieres controlar luces desde la web o scripts, empieza con `Cloud Authorization` y `device_id` manual.
+
+En `.env` usa:
+
+```env
+TUYA_ACCESS_ID=tu_cloud_access_id
+TUYA_ACCESS_KEY=tu_cloud_access_key
+TUYA_API_ENDPOINT=https://openapi.tuyaus.com
+TUYA_AUTH_SCHEME=cloud
+```
+
+Luego puedes:
+
+```powershell
+python scripts/set_power.py --device-id <device-id> --state on
+python scripts/set_power.py --device-id <device-id> --state off
+```
+
+Y desde el dashboard usar el panel `Power`.
+
+Este modo evita OEM app y OAuth H5, pero normalmente requiere que uses claves de `Cloud Authorization` y conozcas el `device_id` del equipo que quieres controlar.
 
 ## OAuth para Smart Life
 
