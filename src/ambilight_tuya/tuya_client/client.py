@@ -140,6 +140,18 @@ class TuyaClient:
         self._ensure_connected()
         return self._api.post(self._command_path(device_id), {"commands": commands})
 
+    @staticmethod
+    def _parse_color_payload(raw_value: Any) -> dict[str, Any]:
+        if isinstance(raw_value, dict):
+            return dict(raw_value)
+        if isinstance(raw_value, str) and raw_value.strip():
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
     def list_devices(self) -> list[dict[str, Any]]:
         self._ensure_connected()
         if self._uses_app_authorization():
@@ -370,16 +382,48 @@ class TuyaClient:
             target_value = max_value
         else:
             target_value = round(min_value + ((max_value - min_value) * (clamped_level / 100.0)))
-        response = self._post_commands_raw(
-            device_id,
-            [{"code": brightness_code, "value": target_value}],
-        )
+
+        # For RGB devices in color mode, preserve the active hue/saturation by
+        # updating only the value/brightness component of the current color payload.
+        status_map = dict(resolved_capabilities.get("status_map", {}))
+        color_mode_code = resolved_capabilities.get("color_mode_code")
+        color_data_code = resolved_capabilities.get("color_data_code")
+        current_mode = str(status_map.get(color_mode_code, "")).lower() if color_mode_code else ""
+        current_color_payload = self._parse_color_payload(status_map.get(color_data_code))
+
+        if (
+            resolved_capabilities.get("color_supported")
+            and color_mode_code
+            and color_data_code
+            and current_mode in {"colour", "color"}
+            and current_color_payload
+        ):
+            preserved_color_payload = dict(current_color_payload)
+            preserved_color_payload["v"] = max(0, min(1000, round(clamped_level * 10)))
+            response = self._post_commands_raw(
+                device_id,
+                [
+                    {"code": color_mode_code, "value": status_map.get(color_mode_code, "colour")},
+                    {"code": color_data_code, "value": preserved_color_payload},
+                ],
+            )
+            self._require_success(response)
+            return {
+                "response": response,
+                "brightness_code": color_data_code,
+                "target_value": preserved_color_payload["v"],
+                "level": clamped_level,
+                "strategy": "preserve_color_payload",
+            }
+
+        response = self._post_commands_raw(device_id, [{"code": brightness_code, "value": target_value}])
         self._require_success(response)
         return {
             "response": response,
             "brightness_code": brightness_code,
             "target_value": target_value,
             "level": clamped_level,
+            "strategy": "brightness_datapoint",
         }
 
     def set_fixed_color(

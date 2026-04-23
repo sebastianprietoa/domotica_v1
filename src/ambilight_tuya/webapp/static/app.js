@@ -20,6 +20,8 @@ const state = {
   previewBusy: false,
   previewTargetFps: 4,
   previewRunning: false,
+  previewMonitorIndex: 1,
+  previewMonitors: [],
 };
 
 const els = {
@@ -37,6 +39,8 @@ const els = {
   previewStatusPill: document.querySelector("#preview-status-pill"),
   previewRatePill: document.querySelector("#preview-rate-pill"),
   previewSampledPill: document.querySelector("#preview-sampled-pill"),
+  previewMonitorSelect: document.querySelector("#preview-monitor-select"),
+  previewMonitorPill: document.querySelector("#preview-monitor-pill"),
 };
 
 const pretty = (value) => JSON.stringify(value, null, 2);
@@ -161,6 +165,16 @@ function renderAmbilightGrid(payload) {
       <div class="ambilight-cell-hex">${escapeHtml(cell.hex)}</div>
     </article>
   `).join("");
+}
+
+function updatePreviewMonitorOptions(monitors = state.previewMonitors) {
+  if (!els.previewMonitorSelect) return;
+  const options = monitors.map((monitor) => {
+    const label = `Monitor ${monitor.index}${monitor.is_primary ? " (Primary)" : ""} - ${monitor.width}x${monitor.height}`;
+    const selected = Number(monitor.index) === Number(state.previewMonitorIndex) ? " selected" : "";
+    return `<option value="${escapeHtml(monitor.index)}"${selected}>${escapeHtml(label)}</option>`;
+  }).join("");
+  els.previewMonitorSelect.innerHTML = options || '<option value="1">Monitor 1</option>';
 }
 
 function reachabilityBadge(device) {
@@ -319,6 +333,14 @@ function updatePreviewStatus({ running = state.previewRunning, sampledAt = null 
     els.previewSampledPill.textContent = sampledAt
       ? `Sampled ${new Date(sampledAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
       : "No sample yet";
+  }
+  if (els.previewMonitorPill) {
+    const currentMonitor = state.previewMonitors.find((monitor) => Number(monitor.index) === Number(state.previewMonitorIndex));
+    if (currentMonitor) {
+      els.previewMonitorPill.textContent = `Source M${currentMonitor.index}${currentMonitor.is_primary ? " primary" : ""}`;
+    } else {
+      els.previewMonitorPill.textContent = `Source M${state.previewMonitorIndex}`;
+    }
   }
 }
 
@@ -571,7 +593,14 @@ async function refreshAmbilightPreview({ quiet = false } = {}) {
   if (state.previewBusy) return;
   state.previewBusy = true;
   try {
-    const payload = await getJson("/api/ambilight-preview");
+    const payload = await getJson(`/api/ambilight-preview?monitor_index=${encodeURIComponent(state.previewMonitorIndex)}`);
+    if (Array.isArray(payload.monitors)) {
+      state.previewMonitors = payload.monitors;
+      updatePreviewMonitorOptions(payload.monitors);
+    }
+    if (payload.source_monitor?.index) {
+      state.previewMonitorIndex = Number(payload.source_monitor.index);
+    }
     renderAmbilightGrid(payload);
     updatePreviewStatus({ running: state.previewRunning, sampledAt: payload.sampled_at });
     if (!quiet) {
@@ -621,6 +650,13 @@ async function refreshSystemStatus() {
     els.oauthPill.textContent = payload.oauth?.authorized ? "OAuth active" : "OAuth idle";
     if (payload.preview?.target_fps) {
       state.previewTargetFps = payload.preview.target_fps;
+    }
+    if (Array.isArray(payload.monitors)) {
+      state.previewMonitors = payload.monitors;
+      if (!state.previewMonitorIndex) {
+        state.previewMonitorIndex = Number(payload.preview?.default_monitor_index || payload.monitors[0]?.index || 1);
+      }
+      updatePreviewMonitorOptions(payload.monitors);
     }
     updatePreviewStatus({ running: state.previewRunning });
   } catch (error) {
@@ -1054,6 +1090,16 @@ if (els.spaceFilter) {
   els.spaceFilter.addEventListener("change", (event) => {
     state.selectedSpace = event.target.value;
     renderDevices();
+  });
+}
+
+if (els.previewMonitorSelect) {
+  els.previewMonitorSelect.addEventListener("change", (event) => {
+    state.previewMonitorIndex = Number(event.target.value || 1);
+    updatePreviewStatus({ running: state.previewRunning });
+    if (state.previewRunning) {
+      refreshAmbilightPreview({ quiet: true });
+    }
   });
 }
 

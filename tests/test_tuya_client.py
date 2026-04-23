@@ -73,6 +73,8 @@ class FakeOpenAPI:
             "result": [
                 {"code": "switch_led", "value": True},
                 {"code": "bright_value_v2", "value": 505},
+                {"code": "work_mode", "value": "colour"},
+                {"code": "colour_data_v2", "value": {"h": 360, "s": 1000, "v": 1000}},
             ],
         }
 
@@ -167,4 +169,8 @@ def test_tuya_client_sets_brightness() -> None:
     result = client.set_brightness("device-1", 50)
 
     assert result["brightness_code"] == "bright_value_v2"
-    assert client._api.commands[0][1]["commands"] == [{"code": "bright_value_v2", "value": 505}]
+    assert result["strategy"] == "preserve_color_payload"
+    assert client._api.commands[0][1]["commands"][0]["code"] == "work_mode"
+    assert client._api.commands[0][1]["commands"][1]["code"] == "colour_data_v2"
+    assert client._api.commands[0][1]["commands"][1]["value"]["h"] == 360
+    assert client._api.commands[0][1]["commands"][1]["value"]["s"] == 1000

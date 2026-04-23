@@ -116,7 +116,12 @@ class FakeDashboardClient:
         return {"color_data_code": "colour_data_v2", "response": {"success": True}}
 
     def set_brightness(self, device_id: str, level: int, capabilities=None) -> dict:
-        return {"brightness_code": "bright_value_v2", "level": level, "response": {"success": True}}
+        return {
+            "brightness_code": "colour_data_v2",
+            "level": level,
+            "strategy": "preserve_color_payload",
+            "response": {"success": True},
+        }
 
 
 def test_list_devices_returns_normalized_cards(monkeypatch) -> None:
@@ -217,11 +222,11 @@ def test_ambilight_preview_returns_4x4_grid(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "ambilight_tuya.webapp.app.list_monitors",
-        lambda: [{"left": 0, "top": 0, "width": 40, "height": 40}],
+        lambda: [{"index": 1, "left": 0, "top": 0, "width": 40, "height": 40, "is_primary": True}],
     )
     monkeypatch.setattr(
-        "ambilight_tuya.webapp.app.ScreenCaptureService.capture_frame",
-        lambda self: frame,
+        "ambilight_tuya.webapp.app.ScreenCaptureService.capture_frame_with_metadata",
+        lambda self: (frame, {"index": 1, "left": 0, "top": 0, "width": 40, "height": 40, "is_primary": True}),
     )
     app = create_app()
     client = app.test_client()
@@ -235,6 +240,41 @@ def test_ambilight_preview_returns_4x4_grid(monkeypatch) -> None:
     assert len(payload["cells"]) == 16
     assert payload["cells"][0]["hex"].startswith("#")
     assert payload["monitor_index"] == 1
+    assert payload["is_primary_monitor"] is True
+    assert payload["source_monitor"]["index"] == 1
+
+
+def test_ambilight_preview_respects_selected_monitor(monkeypatch) -> None:
+    frame = np.full((40, 40, 3), 255, dtype=np.uint8)
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.load_project_config",
+        lambda: AppConfig(
+            capture=CaptureConfig(monitor_index=2, downsample=1, target_fps=8),
+            extraction=ColorExtractionConfig(),
+            smoothing=SmoothingConfig(alpha=0.35, min_update_interval_ms=150, min_color_delta=10.0),
+        ),
+    )
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.list_monitors",
+        lambda: [
+            {"index": 1, "left": 0, "top": 0, "width": 40, "height": 40, "is_primary": True},
+            {"index": 2, "left": 40, "top": 0, "width": 40, "height": 40, "is_primary": False},
+        ],
+    )
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.ScreenCaptureService.capture_frame_with_metadata",
+        lambda self: (frame, {"index": self.config.monitor_index, "left": 40, "top": 0, "width": 40, "height": 40, "is_primary": False}),
+    )
+    app = create_app()
+    client = app.test_client()
+
+    response = client.get("/api/ambilight-preview?monitor_index=2")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["monitor_index"] == 2
+    assert payload["source_monitor"]["index"] == 2
+    assert payload["is_primary_monitor"] is False
 
 
 def test_list_devices_requires_oauth_for_app_authorization(monkeypatch) -> None:

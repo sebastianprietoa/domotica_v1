@@ -200,6 +200,12 @@ class PreviewGridSession:
             }
 
 
+def _resolve_preview_monitor_index(requested_monitor_index: str | None, fallback_monitor_index: int) -> int:
+    if requested_monitor_index is None or not requested_monitor_index.strip():
+        return fallback_monitor_index
+    return int(requested_monitor_index.strip())
+
+
 def _parse_rgb(raw_value: str) -> RGBColor:
     parts = [int(part.strip()) for part in raw_value.split(",")]
     if len(parts) != 3:
@@ -459,14 +465,21 @@ def create_app() -> Flask:
 
     @app.get("/api/status")
     def api_status():
+        monitors = list_monitors()
+        primary_monitor = next((monitor for monitor in monitors if monitor.get("is_primary")), monitors[0] if monitors else None)
         return jsonify(
             {
                 "sync": sync_session.status(),
                 "oauth": oauth_session.status(),
                 "oauth_callback_url": _oauth_callback_url(),
                 "debug_log_count": len(debug_log_session.list()),
-                "preview": {"rows": 4, "cols": 4, "target_fps": 4},
-                "monitors": list_monitors(),
+                "preview": {
+                    "rows": 4,
+                    "cols": 4,
+                    "target_fps": 4,
+                    "default_monitor_index": primary_monitor.get("index") if primary_monitor else 1,
+                },
+                "monitors": monitors,
             }
         )
 
@@ -669,7 +682,7 @@ def create_app() -> Flask:
             raise ValueError(_friendly_tuya_message(str(exc), "No fue posible ajustar el brillo."))
         _record_debug(
             "tuya.set_brightness.success",
-            {"device_id": device_id, "level": level, "tuya": client.debug_snapshot()},
+            {"device_id": device_id, "level": level, "result": result, "tuya": client.debug_snapshot()},
         )
         return jsonify({"device_id": device_id, "level": level, "result": result})
 
@@ -697,12 +710,14 @@ def create_app() -> Flask:
     @app.get("/api/ambilight-preview")
     def api_ambilight_preview():
         app_config = load_project_config()
-        monitor_index_raw = request.args.get("monitor_index", "").strip()
-        monitor_index = int(monitor_index_raw) if monitor_index_raw else app_config.capture.monitor_index
+        monitors = list_monitors()
+        primary_monitor = next((monitor for monitor in monitors if monitor.get("is_primary")), monitors[0] if monitors else None)
+        fallback_monitor_index = primary_monitor.get("index") if primary_monitor else app_config.capture.monitor_index
+        monitor_index = _resolve_preview_monitor_index(request.args.get("monitor_index"), fallback_monitor_index)
         capture_config = replace(app_config.capture, monitor_index=monitor_index)
         capture = ScreenCaptureService(capture_config)
         try:
-            frame = capture.capture_frame()
+            frame, monitor_metadata = capture.capture_frame_with_metadata()
             payload = preview_session.sample(frame, app_config.smoothing)
         except Exception as exc:
             _record_debug(
@@ -711,11 +726,27 @@ def create_app() -> Flask:
             )
             raise ValueError("No fue posible capturar la vista previa de pantalla.")
 
+        _record_debug(
+            "preview.grid.success",
+            {
+                "monitor_index": monitor_index,
+                "monitor": monitor_metadata,
+                "frame_shape": list(frame.shape),
+            },
+        )
         payload.update(
             {
                 "monitor_index": monitor_index,
+                "source_monitor": monitor_metadata,
+                "is_primary_monitor": bool(monitor_metadata.get("is_primary")),
                 "frame_shape": list(frame.shape),
-                "monitors": list_monitors(),
+                "capture_origin": {
+                    "left": monitor_metadata.get("left"),
+                    "top": monitor_metadata.get("top"),
+                    "width": monitor_metadata.get("width"),
+                    "height": monitor_metadata.get("height"),
+                },
+                "monitors": monitors,
             }
         )
         return jsonify(payload)
