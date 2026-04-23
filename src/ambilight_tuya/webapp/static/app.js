@@ -7,11 +7,15 @@ const COLOR_PRESETS = [
 ];
 
 const KNOWN_DEVICES_STORAGE_KEY = "ambilight_tuya_known_devices";
+const DEVICE_SPACES_STORAGE_KEY = "ambilight_tuya_device_spaces";
+const DEFAULT_SPACES = ["Living Room", "Dormitorio", "Cocina", "Oficina", "Sin espacio"];
 
 const state = {
   devices: [],
   busyDevices: new Set(),
   lastRefreshLabel: "Never refreshed",
+  selectedDeviceId: "",
+  selectedSpace: "all",
 };
 
 const els = {
@@ -23,6 +27,8 @@ const els = {
   lastRefreshPill: document.querySelector("#last-refresh-pill"),
   oauthPill: document.querySelector("#oauth-pill"),
   knownDeviceOutput: document.querySelector("#known-device-output"),
+  devicePicker: document.querySelector("#device-picker"),
+  spaceFilter: document.querySelector("#space-filter"),
 };
 
 const pretty = (value) => JSON.stringify(value, null, 2);
@@ -100,6 +106,26 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function friendlyErrorMessage(message) {
+  const text = String(message || "");
+  if (text.includes("1106") || text.includes("permission deny")) {
+    return "Tuya bloqueo el discovery de este usuario. Puedes seguir usando los dispositivos guardados localmente.";
+  }
+  if (text.includes("2008") || text.includes("command or value not support")) {
+    return "Este dispositivo no acepta ese comando con su perfil actual.";
+  }
+  if (text.includes("brightness datapoint")) {
+    return "Este dispositivo no ofrece control de brillo.";
+  }
+  if (text.includes("power switch datapoint")) {
+    return "Este dispositivo no expone un switch compatible para control remoto.";
+  }
+  if (text.includes("color datapoints")) {
+    return "Este dispositivo no soporta color.";
+  }
+  return text;
+}
+
 function powerBadge(powerState) {
   if (powerState === "on") return `<span class="badge badge-on">On</span>`;
   if (powerState === "off") return `<span class="badge badge-off">Off</span>`;
@@ -113,6 +139,7 @@ function reachabilityBadge(device) {
 }
 
 function defaultStatusMessage(device) {
+  if (device.power_supported === false) return "This device is visible but does not expose remote power control.";
   if (device.online === false) return "Device appears offline.";
   if (device.source === "manual") return "Saved locally. Refresh status to validate reachability.";
   return "Ready for control.";
@@ -132,6 +159,42 @@ function saveKnownDevices(devices) {
   window.localStorage.setItem(KNOWN_DEVICES_STORAGE_KEY, JSON.stringify(devices));
 }
 
+function loadDeviceSpaces() {
+  try {
+    const raw = window.localStorage.getItem(DEVICE_SPACES_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDeviceSpaces(deviceSpaces) {
+  window.localStorage.setItem(DEVICE_SPACES_STORAGE_KEY, JSON.stringify(deviceSpaces));
+}
+
+function setDeviceSpace(deviceId, room) {
+  const nextSpaces = loadDeviceSpaces();
+  if (!room || room === "Sin espacio") delete nextSpaces[deviceId];
+  else nextSpaces[deviceId] = room;
+  saveDeviceSpaces(nextSpaces);
+}
+
+function applyLocalSpaces(devices) {
+  const deviceSpaces = loadDeviceSpaces();
+  return devices.map((device) => ({
+    ...device,
+    room: deviceSpaces[device.id] || device.room || "",
+  }));
+}
+
+function availableSpaces(devices = state.devices) {
+  const fromDevices = devices
+    .map((device) => device.room || "")
+    .filter(Boolean);
+  return Array.from(new Set([...DEFAULT_SPACES, ...fromDevices])).filter(Boolean);
+}
+
 function normalizeKnownDevice(device) {
   return {
     id: String(device.id || device.device_id || "").trim(),
@@ -146,6 +209,10 @@ function normalizeKnownDevice(device) {
     state_label: device.state_label || "Unknown",
     is_rgb_capable: Boolean(device.is_rgb_capable),
     supports_color: Boolean(device.is_rgb_capable),
+    power_supported: device.power_supported ?? true,
+    brightness_supported: Boolean(device.brightness_supported),
+    current_brightness: Number.isFinite(device.current_brightness) ? Number(device.current_brightness) : null,
+    room: String(device.room || "").trim(),
     status_map: device.status_map || {},
     raw: device.raw || {},
     source: "manual",
@@ -171,13 +238,14 @@ function mergeKnownDevices(cloudDevices, knownDevices) {
         product_name: existing.product_name || normalizedKnown.product_name,
         is_rgb_capable: existing.is_rgb_capable ?? normalizedKnown.is_rgb_capable,
         supports_color: existing.supports_color ?? normalizedKnown.is_rgb_capable,
+        room: existing.room || normalizedKnown.room,
         source: "cloud+manual",
       });
     } else {
       merged.set(normalizedKnown.id, normalizedKnown);
     }
   });
-  return Array.from(merged.values()).sort((left, right) => {
+  return applyLocalSpaces(Array.from(merged.values())).sort((left, right) => {
     const leftKey = `${left.name}`.toLowerCase();
     const rightKey = `${right.name}`.toLowerCase();
     return leftKey.localeCompare(rightKey);
@@ -194,6 +262,8 @@ function syncKnownDevicesFromState() {
       category: device.category,
       product_name: device.product_name,
       is_rgb_capable: device.is_rgb_capable,
+      brightness_supported: device.brightness_supported,
+      room: device.room || "",
     }));
   saveKnownDevices(savedDevices);
   writeOutput("#known-device-output", { devices: savedDevices, count: savedDevices.length });
@@ -210,14 +280,46 @@ function updateHeroStats() {
 function setDevices(devices) {
   state.devices = devices.map((device) => ({
     ...device,
+    room: device.room || "",
     statusMessage: device.statusMessage || defaultStatusMessage(device),
     feedbackTone: device.feedbackTone || "default",
   }));
+  if (!state.devices.some((device) => device.id === state.selectedDeviceId)) {
+    state.selectedDeviceId = state.devices[0]?.id || "";
+  }
   renderDevices();
+}
+
+function updateDeviceSelectors() {
+  const options = state.devices.map((device) => `
+    <option value="${escapeHtml(device.id)}"${state.selectedDeviceId === device.id ? " selected" : ""}>
+      ${escapeHtml(`${device.name} · ${device.short_id || device.id} · ${device.type_label || "Tuya device"} · ${device.reachability_label || "Unknown"}`)}
+    </option>
+  `).join("");
+
+  if (els.devicePicker) {
+    els.devicePicker.innerHTML = `<option value="">Select a device</option>${options}`;
+    els.devicePicker.value = state.selectedDeviceId || "";
+  }
+
+  document.querySelectorAll("[data-device-select]").forEach((select) => {
+    const currentValue = select.value;
+    select.innerHTML = `<option value="">Select from dashboard</option>${options}`;
+    select.value = state.devices.some((device) => device.id === currentValue) ? currentValue : state.selectedDeviceId || "";
+  });
+
+  if (els.spaceFilter) {
+    const spaceOptions = availableSpaces().map((space) => {
+      const selected = state.selectedSpace === space ? " selected" : "";
+      return `<option value="${escapeHtml(space)}"${selected}>${escapeHtml(space)}</option>`;
+    }).join("");
+    els.spaceFilter.innerHTML = `<option value="all"${state.selectedSpace === "all" ? " selected" : ""}>All spaces</option>${spaceOptions}`;
+  }
 }
 
 function renderDevices() {
   updateHeroStats();
+  updateDeviceSelectors();
 
   if (!state.devices.length) {
     els.deviceGrid.innerHTML = `
@@ -231,11 +333,66 @@ function renderDevices() {
     return;
   }
 
-  els.deviceGrid.innerHTML = state.devices.map((device) => {
+  const visibleDevices = state.selectedSpace === "all"
+    ? state.devices
+    : state.devices.filter((device) => (device.room || "Sin espacio") === state.selectedSpace);
+  if (!visibleDevices.length) {
+    els.deviceGrid.innerHTML = `
+      <article class="empty-state">
+        <div>
+          <h3>No devices in this space</h3>
+          <p>Try another filter or assign devices to a different space.</p>
+        </div>
+      </article>
+    `;
+    return;
+  }
+
+  const groupedDevices = new Map();
+  visibleDevices.forEach((device) => {
+    const room = device.room || "Sin espacio";
+    const bucket = groupedDevices.get(room) || [];
+    bucket.push(device);
+    groupedDevices.set(room, bucket);
+  });
+
+  els.deviceGrid.innerHTML = Array.from(groupedDevices.entries()).map(([room, devices]) => `
+    <section class="device-group">
+      <div class="device-group-head">
+        <div>
+          <p class="section-kicker">Space</p>
+          <h3>${escapeHtml(room)}</h3>
+        </div>
+        <span class="pill pill-muted">${devices.length} device${devices.length === 1 ? "" : "s"}</span>
+      </div>
+      <div class="device-group-grid">
+        ${devices.map((device) => {
     const isBusy = state.busyDevices.has(device.id);
+    const powerDisabled = isBusy || device.power_supported === false;
     const statusText = device.statusMessage || defaultStatusMessage(device);
     const sourceBadge = device.source === "manual" || device.source === "cloud+manual"
       ? `<span class="pill pill-muted">Saved</span>`
+      : "";
+    const dimmerControls = device.brightness_supported
+      ? `
+        <section class="device-dimmer-panel">
+          <div class="device-meta-row">
+            <strong>Brightness</strong>
+            <span class="pill pill-muted">${device.current_brightness ?? 0}%</span>
+          </div>
+          <div class="dimmer-row">
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value="${escapeHtml(device.current_brightness ?? 50)}"
+              data-device-brightness-input="${escapeHtml(device.id)}"
+              ${isBusy ? "disabled" : ""}
+            >
+            <button type="button" class="button-ghost" data-device-brightness-apply="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>Apply</button>
+          </div>
+        </section>
+      `
       : "";
     const colorControls = device.is_rgb_capable
       ? `
@@ -267,6 +424,10 @@ function renderDevices() {
     const removeButton = (device.source === "manual" || device.source === "cloud+manual")
       ? `<button type="button" class="button-ghost" data-device-remove="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>Forget saved device</button>`
       : "";
+    const roomOptions = availableSpaces(state.devices).map((space) => {
+      const selected = (device.room || "Sin espacio") === space ? " selected" : "";
+      return `<option value="${escapeHtml(space)}"${selected}>${escapeHtml(space)}</option>`;
+    }).join("");
 
     return `
       <article class="device-card" data-device-card="${escapeHtml(device.id)}">
@@ -289,12 +450,21 @@ function renderDevices() {
         </div>
 
         <div class="device-actions">
-          <button type="button" data-device-on="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>On</button>
-          <button type="button" class="button-off" data-device-off="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>Off</button>
+          <button type="button" data-device-on="${escapeHtml(device.id)}" ${powerDisabled ? "disabled" : ""}>On</button>
+          <button type="button" class="button-off" data-device-off="${escapeHtml(device.id)}" ${powerDisabled ? "disabled" : ""}>Off</button>
           <button type="button" class="button-ghost" data-device-refresh="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>Refresh</button>
           ${removeButton}
         </div>
 
+        <div class="device-inline-selects">
+          <label>Space
+            <select data-device-room="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>
+              ${roomOptions}
+            </select>
+          </label>
+        </div>
+
+        ${dimmerControls}
         ${colorControls}
 
         <div class="device-footer">
@@ -302,7 +472,10 @@ function renderDevices() {
         </div>
       </article>
     `;
-  }).join("");
+  }).join("")}
+      </div>
+    </section>
+  `).join("");
 
   bindDeviceCardActions();
 }
@@ -330,7 +503,11 @@ function normalizeStatusPayload(payload, previousDevice = {}) {
     power_state: payload.power_state || previousDevice.power_state || "unknown",
     state_label: payload.state_label || previousDevice.state_label || "Unknown",
     is_rgb_capable: payload.is_rgb_capable ?? previousDevice.is_rgb_capable ?? false,
-    supports_color: payload.is_rgb_capable ?? previousDevice.is_rgb_capable ?? false,
+    supports_color: payload.supports_color ?? previousDevice.supports_color ?? false,
+    power_supported: payload.power_supported ?? previousDevice.power_supported ?? true,
+    brightness_supported: payload.brightness_supported ?? previousDevice.brightness_supported ?? false,
+    current_brightness: payload.current_brightness ?? previousDevice.current_brightness ?? null,
+    room: previousDevice.room || payload.room || "",
     status_map: payload.status_map || previousDevice.status_map || {},
     statusMessage: payload.online === false ? "Device appears offline." : "Status refreshed.",
     feedbackTone: "success",
@@ -378,13 +555,14 @@ async function refreshDevices() {
     state.lastRefreshLabel = formatNowLabel("Devices refreshed");
     setGlobalFeedback(`Loaded ${state.devices.length} device${state.devices.length === 1 ? "" : "s"}.`, "success");
   } catch (error) {
+    const friendlyMessage = friendlyErrorMessage(error.message);
     if (knownDevices.length) {
       setDevices(mergeKnownDevices([], knownDevices));
       state.lastRefreshLabel = formatNowLabel("Saved catalog loaded");
-      setGlobalFeedback(`${error.message} Showing ${knownDevices.length} saved device${knownDevices.length === 1 ? "" : "s"} instead.`, "error");
+      setGlobalFeedback(`${friendlyMessage} Showing ${knownDevices.length} saved device${knownDevices.length === 1 ? "" : "s"} instead.`, "error");
     } else {
       setDevices([]);
-      setGlobalFeedback(`${error.message} Add known devices manually to see cards.`, "error");
+      setGlobalFeedback(`${friendlyMessage} Add known devices manually to see cards.`, "error");
     }
   } finally {
     syncKnownDevicesFromState();
@@ -401,7 +579,7 @@ async function refreshDeviceStatus(deviceId, { quiet = false } = {}) {
     mergeDeviceUpdate(deviceId, normalizeStatusPayload(payload, device));
     if (!quiet) setGlobalFeedback(`${device.name}: status updated.`, "success");
   } catch (error) {
-    mergeDeviceUpdate(deviceId, { statusMessage: error.message, feedbackTone: "error" });
+    mergeDeviceUpdate(deviceId, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
     if (!quiet) setGlobalFeedback(`Status refresh failed for ${device.name}.`, "error");
   } finally {
     withDeviceBusy(deviceId, false);
@@ -439,7 +617,7 @@ async function applyPower(deviceId, powerState) {
     await refreshDeviceStatus(deviceId, { quiet: true });
     setGlobalFeedback(`${device.name}: power ${powerState}.`, "success");
   } catch (error) {
-    mergeDeviceUpdate(deviceId, { statusMessage: error.message, feedbackTone: "error" });
+    mergeDeviceUpdate(deviceId, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
     renderDevices();
     setGlobalFeedback(`${device.name}: power command failed.`, "error");
   } finally {
@@ -465,7 +643,7 @@ async function applyColor(deviceId, rgbValue) {
     await refreshDeviceStatus(deviceId, { quiet: true });
     setGlobalFeedback(`${device.name}: color updated.`, "success");
   } catch (error) {
-    mergeDeviceUpdate(deviceId, { statusMessage: error.message, feedbackTone: "error" });
+    mergeDeviceUpdate(deviceId, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
     renderDevices();
     setGlobalFeedback(`${device.name}: color command failed.`, "error");
   } finally {
@@ -475,13 +653,51 @@ async function applyColor(deviceId, rgbValue) {
   }
 }
 
+async function applyBrightness(deviceId, level) {
+  const device = state.devices.find((item) => item.id === deviceId);
+  if (!device) return;
+  withDeviceBusy(deviceId, true);
+  try {
+    await postJson("/api/set-brightness", { device_id: deviceId, level });
+    mergeDeviceUpdate(deviceId, {
+      current_brightness: Number(level),
+      statusMessage: `Brightness set to ${level}%.`,
+      feedbackTone: "success",
+    });
+    renderDevices();
+    await refreshDeviceStatus(deviceId, { quiet: true });
+    setGlobalFeedback(`${device.name}: brightness updated.`, "success");
+  } catch (error) {
+    mergeDeviceUpdate(deviceId, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
+    renderDevices();
+    setGlobalFeedback(`${device.name}: brightness command failed.`, "error");
+  } finally {
+    withDeviceBusy(deviceId, false);
+    syncKnownDevicesFromState();
+    await refreshSystemStatus();
+  }
+}
+
+function assignDeviceSpace(deviceId, room) {
+  setDeviceSpace(deviceId, room);
+  mergeDeviceUpdate(deviceId, { room: room === "Sin espacio" ? "" : room });
+  renderDevices();
+  syncKnownDevicesFromState();
+  setGlobalFeedback("Device space updated.", "success");
+}
+
 function removeKnownDevice(deviceId) {
   const knownDevices = loadKnownDevices().filter((device) => device.id !== deviceId);
   saveKnownDevices(knownDevices);
+  setDeviceSpace(deviceId, "");
   state.devices = state.devices.filter((device) => device.id !== deviceId);
   renderDevices();
   writeOutput("#known-device-output", { devices: knownDevices, count: knownDevices.length });
   setGlobalFeedback("Saved device removed from local catalog.", "success");
+}
+
+function resolveFormDeviceId(form, selectName = "device_select", textName = "device_id") {
+  return String(form.get(selectName) || form.get(textName) || "").trim();
 }
 
 function bindDeviceCardActions() {
@@ -503,6 +719,15 @@ function bindDeviceCardActions() {
       applyColor(button.dataset.deviceCustomColor, input?.value?.trim() || "");
     });
   });
+  document.querySelectorAll("[data-device-brightness-apply]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = document.querySelector(`[data-device-brightness-input="${button.dataset.deviceBrightnessApply}"]`);
+      applyBrightness(button.dataset.deviceBrightnessApply, Number(input?.value || 0));
+    });
+  });
+  document.querySelectorAll("[data-device-room]").forEach((select) => {
+    select.addEventListener("change", () => assignDeviceSpace(select.dataset.deviceRoom, select.value));
+  });
   document.querySelectorAll("[data-device-remove]").forEach((button) => {
     button.addEventListener("click", () => removeKnownDevice(button.dataset.deviceRemove));
   });
@@ -514,6 +739,30 @@ bindAction("[data-action='refresh-devices']", async () => {
 
 bindAction("[data-action='refresh-status']", async () => {
   await refreshAllStatuses();
+});
+
+bindAction("[data-action='picker-on']", async () => {
+  if (!state.selectedDeviceId) {
+    setGlobalFeedback("Select a device first.", "error");
+    return;
+  }
+  await applyPower(state.selectedDeviceId, "on");
+});
+
+bindAction("[data-action='picker-off']", async () => {
+  if (!state.selectedDeviceId) {
+    setGlobalFeedback("Select a device first.", "error");
+    return;
+  }
+  await applyPower(state.selectedDeviceId, "off");
+});
+
+bindAction("[data-action='picker-refresh']", async () => {
+  if (!state.selectedDeviceId) {
+    setGlobalFeedback("Select a device first.", "error");
+    return;
+  }
+  await refreshDeviceStatus(state.selectedDeviceId);
 });
 
 bindAction("[data-action='load-known-devices']", async () => {
@@ -562,6 +811,7 @@ bindForm("#known-device-form", async (form) => {
     id: form.get("device_id"),
     name: form.get("name"),
     type_label: form.get("type_label") || "Known device",
+    room: form.get("room") || "",
     is_rgb_capable: form.get("is_rgb_capable") === "on",
   });
   if (!entry.id) {
@@ -576,7 +826,9 @@ bindForm("#known-device-form", async (form) => {
     category: entry.category,
     product_name: entry.product_name,
     is_rgb_capable: entry.is_rgb_capable,
+    room: entry.room,
   });
+  if (entry.room) setDeviceSpace(entry.id, entry.room);
   saveKnownDevices(knownDevices);
   setDevices(mergeKnownDevices(state.devices, knownDevices));
   syncKnownDevicesFromState();
@@ -589,13 +841,13 @@ bindForm("#known-device-form", async (form) => {
 bindForm("#device-status-form", async (form) => {
   try {
     const payload = await postJson("/api/get-device-status", {
-      device_id: form.get("device_id"),
+      device_id: resolveFormDeviceId(form),
     });
     writeOutput("#device-status-output", payload);
     setGlobalFeedback("Manual status lookup completed.", "success");
   } catch (error) {
-    writeOutput("#device-status-output", error.message);
-    setGlobalFeedback(error.message, "error");
+    writeOutput("#device-status-output", friendlyErrorMessage(error.message));
+    setGlobalFeedback(friendlyErrorMessage(error.message), "error");
   } finally {
     await refreshDiagnostics();
   }
@@ -604,15 +856,15 @@ bindForm("#device-status-form", async (form) => {
 bindForm("#power-form", async (form) => {
   try {
     const payload = await postJson("/api/set-power", {
-      device_id: form.get("device_id"),
+      device_id: resolveFormDeviceId(form),
       zone: form.get("zone"),
       state: form.get("state"),
     });
     writeOutput("#power-output", payload);
     setGlobalFeedback("Manual power command sent.", "success");
   } catch (error) {
-    writeOutput("#power-output", error.message);
-    setGlobalFeedback(error.message, "error");
+    writeOutput("#power-output", friendlyErrorMessage(error.message));
+    setGlobalFeedback(friendlyErrorMessage(error.message), "error");
   } finally {
     await refreshDiagnostics();
   }
@@ -621,15 +873,31 @@ bindForm("#power-form", async (form) => {
 bindForm("#fixed-color-form", async (form) => {
   try {
     const payload = await postJson("/api/set-fixed-color", {
-      device_id: form.get("device_id"),
+      device_id: resolveFormDeviceId(form),
       zone: form.get("zone"),
       rgb: form.get("rgb"),
     });
     writeOutput("#fixed-color-output", payload);
     setGlobalFeedback("Manual color command sent.", "success");
   } catch (error) {
-    writeOutput("#fixed-color-output", error.message);
-    setGlobalFeedback(error.message, "error");
+    writeOutput("#fixed-color-output", friendlyErrorMessage(error.message));
+    setGlobalFeedback(friendlyErrorMessage(error.message), "error");
+  } finally {
+    await refreshDiagnostics();
+  }
+});
+
+bindForm("#brightness-form", async (form) => {
+  try {
+    const payload = await postJson("/api/set-brightness", {
+      device_id: resolveFormDeviceId(form),
+      level: Number(form.get("level")),
+    });
+    writeOutput("#brightness-output", payload);
+    setGlobalFeedback("Manual brightness command sent.", "success");
+  } catch (error) {
+    writeOutput("#brightness-output", friendlyErrorMessage(error.message));
+    setGlobalFeedback(friendlyErrorMessage(error.message), "error");
   } finally {
     await refreshDiagnostics();
   }
@@ -667,6 +935,19 @@ bindForm("#sync-form", async (form) => {
     await refreshSystemStatus();
   }
 });
+
+if (els.devicePicker) {
+  els.devicePicker.addEventListener("change", (event) => {
+    state.selectedDeviceId = event.target.value;
+  });
+}
+
+if (els.spaceFilter) {
+  els.spaceFilter.addEventListener("change", (event) => {
+    state.selectedSpace = event.target.value;
+    renderDevices();
+  });
+}
 
 loadSavedDevicesIntoState();
 refreshDiagnostics();

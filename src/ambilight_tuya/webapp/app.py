@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 import os
+import re
 import threading
 from typing import Any
 
@@ -19,6 +20,7 @@ from ambilight_tuya.tuya_client import TuyaClient, TuyaApiError
 from ambilight_tuya.utils import configure_logging
 
 POWER_CODES = ("switch_led", "switch", "switch_1")
+BRIGHTNESS_CODES = ("bright_value_v2", "bright_value", "bright_value_1", "bright_value_2")
 RGB_STATUS_CODES = ("work_mode", "colour_data", "colour_data_v2", "bright_value_v2", "temp_value_v2")
 CATEGORY_LABELS = {
     "dj": "RGB light",
@@ -211,7 +213,91 @@ def _guess_rgb_capability(raw_device: dict[str, Any], status_map: dict[str, Any]
     return any(hint in f"{name} {product_name}" for hint in rgb_hints)
 
 
-def _normalize_device_record(raw_device: dict[str, Any], status_map: dict[str, Any] | None = None) -> dict[str, Any]:
+def _extract_room_name(raw_device: dict[str, Any]) -> str | None:
+    direct_candidates = (
+        raw_device.get("room_name"),
+        raw_device.get("room"),
+        raw_device.get("space_name"),
+        raw_device.get("space"),
+        raw_device.get("home_name"),
+        raw_device.get("home"),
+    )
+    for candidate in direct_candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    local_key_candidates = (
+        raw_device.get("local_key"),
+        raw_device.get("custom_name"),
+    )
+    for candidate in local_key_candidates:
+        if isinstance(candidate, dict):
+            for nested_key in ("room_name", "space_name", "home_name"):
+                nested_value = candidate.get(nested_key)
+                if isinstance(nested_value, str) and nested_value.strip():
+                    return nested_value.strip()
+    return None
+
+
+def _current_brightness_percent(
+    status_map: dict[str, Any],
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int | None:
+    for code in BRIGHTNESS_CODES:
+        if code not in status_map:
+            continue
+        try:
+            raw_value = int(status_map[code])
+        except (TypeError, ValueError):
+            return None
+        resolved_min = min_value if min_value is not None else (10 if code.endswith("_v2") else 0)
+        resolved_max = max_value if max_value is not None else (1000 if code.endswith("_v2") else 255)
+        if resolved_max <= resolved_min:
+            return 100
+        normalized = round(((raw_value - resolved_min) / (resolved_max - resolved_min)) * 100)
+        return max(0, min(normalized, 100))
+    return None
+
+
+def _capability_snapshot(
+    raw_device: dict[str, Any],
+    status_map: dict[str, Any],
+    capabilities: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolved_capabilities = capabilities or {}
+    power_codes = list(resolved_capabilities.get("power_codes", []))
+    if not power_codes:
+        power_codes = [code for code in POWER_CODES if code in status_map]
+    brightness_supported = bool(resolved_capabilities.get("brightness_supported"))
+    if not brightness_supported:
+        brightness_supported = any(code in status_map for code in BRIGHTNESS_CODES)
+    brightness_min = resolved_capabilities.get("brightness_min")
+    brightness_max = resolved_capabilities.get("brightness_max")
+    brightness_percent = _current_brightness_percent(status_map, brightness_min, brightness_max)
+    is_rgb_capable = _guess_rgb_capability(raw_device, status_map)
+    color_supported = bool(resolved_capabilities.get("color_supported")) or is_rgb_capable
+    return {
+        "power_supported": bool(power_codes),
+        "power_codes": power_codes,
+        "brightness_supported": brightness_supported,
+        "brightness_code": resolved_capabilities.get("brightness_code"),
+        "brightness_min": brightness_min,
+        "brightness_max": brightness_max,
+        "current_brightness": brightness_percent,
+        "current_brightness_raw": resolved_capabilities.get("current_brightness"),
+        "is_rgb_capable": is_rgb_capable,
+        "supports_color": color_supported,
+        "color_mode_code": resolved_capabilities.get("color_mode_code"),
+        "color_data_code": resolved_capabilities.get("color_data_code"),
+    }
+
+
+def _normalize_device_record(
+    raw_device: dict[str, Any],
+    status_map: dict[str, Any] | None = None,
+    capabilities: dict[str, Any] | None = None,
+    room: str | None = None,
+) -> dict[str, Any]:
     resolved_status_map = status_map or _status_items_to_map(raw_device.get("status"))
     category = str(raw_device.get("category", "")).lower()
     name = (
@@ -226,7 +312,7 @@ def _normalize_device_record(raw_device: dict[str, Any], status_map: dict[str, A
     else:
         online = None
     power_state = _derive_power_state(resolved_status_map)
-    is_rgb_capable = _guess_rgb_capability(raw_device, resolved_status_map)
+    capability_snapshot = _capability_snapshot(raw_device, resolved_status_map, capabilities)
     product_name = str(raw_device.get("product_name") or "").strip()
     return {
         "id": str(raw_device.get("id", "")).strip(),
@@ -239,22 +325,49 @@ def _normalize_device_record(raw_device: dict[str, Any], status_map: dict[str, A
         "reachability_label": "Online" if online is True else "Offline" if online is False else "Unknown",
         "power_state": power_state,
         "state_label": power_state.title(),
-        "is_rgb_capable": is_rgb_capable,
-        "supports_color": is_rgb_capable,
+        "room": room or _extract_room_name(raw_device),
         "status_map": resolved_status_map,
         "raw": raw_device,
+        **capability_snapshot,
     }
 
 
-def _serialize_device_status(status) -> dict[str, Any]:
+def _serialize_device_status(status, capabilities: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = asdict(status)
     status_map = dict(status.raw.get("status_map", {}))
     payload["status_map"] = status_map
     payload["power_state"] = status.raw.get("power_state", _derive_power_state(status_map))
     payload["reachability_label"] = "Online" if status.online else "Offline"
     payload["state_label"] = payload["power_state"].title()
-    payload["is_rgb_capable"] = _guess_rgb_capability({"id": status.device_id}, status_map)
+    payload.update(_capability_snapshot({"id": status.device_id}, status_map, capabilities))
     return payload
+
+
+def _friendly_tuya_message(error_message: str, default_message: str) -> str:
+    if "code': 1106" in error_message or '"code": 1106' in error_message:
+        return "Tuya no permite discovery de este usuario/proyecto. Puedes seguir controlando dispositivos guardados o seleccionar uno conocido."
+    if "code': 2008" in error_message or '"code": 2008' in error_message:
+        attempted_codes = re.search(r"Attempted datapoints: ([^.]*)", error_message)
+        if attempted_codes:
+            return (
+                "Este dispositivo no acepto el perfil de energia esperado. "
+                f"Se probaron: {attempted_codes.group(1)}."
+            )
+        return "Este dispositivo no soporta el comando solicitado con su datapoint actual."
+    if "does not expose a supported power switch datapoint" in error_message:
+        return "Este dispositivo no expone un switch compatible para encendido/apagado desde esta integracion."
+    if "does not expose a supported brightness datapoint" in error_message:
+        return "Este dispositivo no ofrece control de brillo."
+    if "does not expose color datapoints" in error_message:
+        return "Este dispositivo no soporta color."
+    return default_message
+
+
+def _fetch_capabilities_safe(client: TuyaClient, device_id: str, status=None) -> dict[str, Any]:
+    try:
+        return client.get_device_capabilities(device_id, status=status)
+    except Exception:
+        return {}
 
 
 def create_app() -> Flask:
@@ -332,7 +445,7 @@ def create_app() -> Flask:
                 "tuya.list_devices.error",
                 {"error": str(exc), "tuya": client.debug_snapshot()},
             )
-            raise
+            raise ValueError(_friendly_tuya_message(str(exc), "No fue posible cargar el catalogo de dispositivos."))
         devices = [
             _normalize_device_record(raw_device)
             for raw_device in raw_devices
@@ -353,17 +466,18 @@ def create_app() -> Flask:
         client = _get_tuya_client(prefer_user_oauth=True)
         try:
             status = client.get_device_status(device_id)
+            capabilities = _fetch_capabilities_safe(client, device_id, status=status)
         except Exception as exc:
             _record_debug(
                 "tuya.get_device_status.error",
                 {"device_id": device_id, "error": str(exc), "tuya": client.debug_snapshot()},
             )
-            raise
+            raise ValueError(_friendly_tuya_message(str(exc), "No fue posible consultar el estado del dispositivo."))
         _record_debug(
             "tuya.get_device_status.success",
             {"device_id": device_id, "tuya": client.debug_snapshot()},
         )
-        return jsonify(_serialize_device_status(status))
+        return jsonify(_serialize_device_status(status, capabilities))
 
     @app.post("/api/set-fixed-color")
     def api_set_fixed_color():
@@ -375,7 +489,14 @@ def create_app() -> Flask:
         client = _get_tuya_client(prefer_user_oauth=True)
         if device_id:
             try:
-                result = client.set_fixed_color(device_id, rgb, app_config.command_profiles["default"])
+                status = client.get_device_status(device_id)
+                capabilities = _fetch_capabilities_safe(client, device_id, status=status)
+                result = client.set_fixed_color(
+                    device_id,
+                    rgb,
+                    app_config.command_profiles["default"],
+                    capabilities=capabilities,
+                )
             except Exception as exc:
                 _record_debug(
                     "tuya.set_fixed_color.error",
@@ -386,7 +507,7 @@ def create_app() -> Flask:
                         "tuya": client.debug_snapshot(),
                     },
                 )
-                raise
+                raise ValueError(_friendly_tuya_message(str(exc), "No fue posible aplicar color a este dispositivo."))
             _record_debug(
                 "tuya.set_fixed_color.success",
                 {"device_id": device_id, "rgb": rgb.as_tuple(), "tuya": client.debug_snapshot()},
@@ -433,13 +554,20 @@ def create_app() -> Flask:
         client = _get_tuya_client(prefer_user_oauth=True)
         if device_id:
             try:
-                result = client.set_power_state(device_id, is_on, app_config.command_profiles["default"])
+                status = client.get_device_status(device_id)
+                capabilities = _fetch_capabilities_safe(client, device_id, status=status)
+                result = client.set_power_state(
+                    device_id,
+                    is_on,
+                    app_config.command_profiles["default"],
+                    capabilities=capabilities,
+                )
             except Exception as exc:
                 _record_debug(
                     "tuya.set_power.error",
                     {"device_id": device_id, "state": state_raw, "error": str(exc), "tuya": client.debug_snapshot()},
                 )
-                raise
+                raise ValueError(_friendly_tuya_message(str(exc), "No fue posible cambiar el estado de energia."))
             _record_debug(
                 "tuya.set_power.success",
                 {"device_id": device_id, "state": state_raw, "tuya": client.debug_snapshot()},
@@ -472,6 +600,34 @@ def create_app() -> Flask:
             {"zone": zone, "state": state_raw, "device_count": len(results), "tuya": client.debug_snapshot()},
         )
         return jsonify({"zone": zone, "state": state_raw, "results": results})
+
+    @app.post("/api/set-brightness")
+    def api_set_brightness():
+        payload = request.get_json(silent=True) or {}
+        device_id = str(payload.get("device_id", "")).strip()
+        if not device_id:
+            raise ValueError("device_id is required")
+        try:
+            level = int(payload.get("level"))
+        except (TypeError, ValueError):
+            raise ValueError("level must be an integer between 0 and 100")
+        level = max(0, min(level, 100))
+        client = _get_tuya_client(prefer_user_oauth=True)
+        try:
+            status = client.get_device_status(device_id)
+            capabilities = _fetch_capabilities_safe(client, device_id, status=status)
+            result = client.set_brightness(device_id, level, capabilities=capabilities)
+        except Exception as exc:
+            _record_debug(
+                "tuya.set_brightness.error",
+                {"device_id": device_id, "level": level, "error": str(exc), "tuya": client.debug_snapshot()},
+            )
+            raise ValueError(_friendly_tuya_message(str(exc), "No fue posible ajustar el brillo."))
+        _record_debug(
+            "tuya.set_brightness.success",
+            {"device_id": device_id, "level": level, "tuya": client.debug_snapshot()},
+        )
+        return jsonify({"device_id": device_id, "level": level, "result": result})
 
     @app.post("/api/screen-sample")
     def api_screen_sample():

@@ -521,6 +521,71 @@ button:disabled {
   align-items: end;
 }
 
+.quick-control-panel {
+  margin: 0 0 18px;
+}
+
+.quick-control-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.4fr) minmax(200px, 0.8fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.quick-control-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.device-group {
+  display: grid;
+  gap: 16px;
+  grid-column: 1 / -1;
+}
+
+.device-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 16px;
+}
+
+.device-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 18px;
+}
+
+.device-inline-selects {
+  display: grid;
+  gap: 10px;
+}
+
+.device-inline-selects select {
+  width: 100%;
+}
+
+.device-dimmer-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(6, 13, 21, 0.42);
+  border: 1px solid rgba(123, 161, 194, 0.14);
+}
+
+.dimmer-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.dimmer-row input[type="range"] {
+  width: 100%;
+}
+
 label {
   display: grid;
   gap: 6px;
@@ -569,6 +634,10 @@ pre {
 
   .hero-stats {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .quick-control-grid {
+    grid-template-columns: 1fr;
   }
 }
 

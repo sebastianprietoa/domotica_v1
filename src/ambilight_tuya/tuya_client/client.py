@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
+import re
 from typing import Any, Callable, Protocol
 
 from ambilight_tuya.models import CommandProfile, DeviceStatus, RGBColor, TuyaCredentials
@@ -11,6 +13,9 @@ from tuya_connector import TuyaOpenAPI
 logger = logging.getLogger(__name__)
 
 POWER_STATUS_CODES = ("switch_led", "switch", "switch_1")
+BRIGHTNESS_CODES = ("bright_value_v2", "bright_value", "bright_value_1", "bright_value_2")
+COLOR_MODE_CODES = ("work_mode",)
+COLOR_DATA_CODES = ("colour_data_v2", "colour_data")
 
 
 class OpenApiProtocol(Protocol):
@@ -90,6 +95,51 @@ class TuyaClient:
     def _uses_app_authorization(self) -> bool:
         return getattr(self._api, "resolved_auth_scheme", self.credentials.auth_scheme) == "app"
 
+    @staticmethod
+    def _parse_values_definition(raw_values: Any) -> dict[str, Any]:
+        if isinstance(raw_values, dict):
+            return raw_values
+        if not raw_values:
+            return {}
+        if isinstance(raw_values, str):
+            try:
+                parsed = json.loads(raw_values)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
+    def _extract_switch_codes_from_iterable(items: list[dict[str, Any]]) -> list[str]:
+        codes: list[str] = []
+        for item in items:
+            code = str(item.get("code", "")).strip()
+            if not code:
+                continue
+            if code == "switch_led" or code == "switch" or re.fullmatch(r"switch_\d+", code):
+                codes.append(code)
+        return codes
+
+    @staticmethod
+    def _unique_codes(*groups: list[str]) -> list[str]:
+        ordered: list[str] = []
+        for group in groups:
+            for code in group:
+                if code and code not in ordered:
+                    ordered.append(code)
+        return ordered
+
+    def _command_path(self, device_id: str) -> str:
+        return (
+            f"/v1.0/devices/{device_id}/commands"
+            if self._uses_app_authorization()
+            else f"/v1.0/iot-03/devices/{device_id}/commands"
+        )
+
+    def _post_commands_raw(self, device_id: str, commands: list[dict[str, Any]]) -> dict[str, Any]:
+        self._ensure_connected()
+        return self._api.post(self._command_path(device_id), {"commands": commands})
+
     def list_devices(self) -> list[dict[str, Any]]:
         self._ensure_connected()
         if self._uses_app_authorization():
@@ -160,34 +210,207 @@ class TuyaClient:
             },
         )
 
-    def send_commands(self, device_id: str, commands: list[dict[str, Any]]) -> dict[str, Any]:
+    def get_device_specification(self, device_id: str) -> dict[str, Any]:
         self._ensure_connected()
-        path = (
-            f"/v1.0/devices/{device_id}/commands"
-            if self._uses_app_authorization()
-            else f"/v1.0/iot-03/devices/{device_id}/commands"
+        if self._uses_app_authorization():
+            return {"functions": [], "status": [], "category": ""}
+        response = self._api.get(f"/v1.0/iot-03/devices/{device_id}/specification")
+        self._require_success(response)
+        result = response.get("result", {})
+        return result if isinstance(result, dict) else {}
+
+    def get_device_capabilities(self, device_id: str, status: DeviceStatus | None = None) -> dict[str, Any]:
+        current_status = status or self.get_device_status(device_id)
+        status_map = dict(current_status.raw.get("status_map", {}))
+        specification = self.get_device_specification(device_id)
+        functions = list(specification.get("functions", []))
+        status_definitions = list(specification.get("status", []))
+
+        observed_switch_codes = self._extract_switch_codes_from_iterable(
+            [{"code": code} for code in status_map.keys()]
         )
-        response = self._api.post(
-            path,
-            {"commands": commands},
+        function_switch_codes = self._extract_switch_codes_from_iterable(functions)
+        status_switch_codes = self._extract_switch_codes_from_iterable(status_definitions)
+        power_codes = self._unique_codes(
+            observed_switch_codes,
+            function_switch_codes,
+            status_switch_codes,
         )
+
+        brightness_code = next(
+            (
+                code
+                for code in self._unique_codes(
+                    [code for code in BRIGHTNESS_CODES if code in status_map],
+                    [item.get("code", "") for item in functions],
+                    [item.get("code", "") for item in status_definitions],
+                )
+                if code in BRIGHTNESS_CODES
+            ),
+            None,
+        )
+        brightness_definition = next(
+            (
+                item
+                for item in [*functions, *status_definitions]
+                if item.get("code") == brightness_code
+            ),
+            {},
+        )
+        brightness_values = self._parse_values_definition(brightness_definition.get("values"))
+        brightness_min = int(brightness_values.get("min", 10 if brightness_code and brightness_code.endswith("_v2") else 0))
+        brightness_max = int(brightness_values.get("max", 1000 if brightness_code and brightness_code.endswith("_v2") else 255))
+
+        current_brightness = None
+        if brightness_code and brightness_code in status_map:
+            try:
+                current_brightness = int(status_map[brightness_code])
+            except (TypeError, ValueError):
+                current_brightness = None
+
+        color_mode_code = next(
+            (
+                code
+                for code in self._unique_codes(
+                    [code for code in COLOR_MODE_CODES if code in status_map],
+                    [item.get("code", "") for item in functions],
+                    [item.get("code", "") for item in status_definitions],
+                )
+                if code in COLOR_MODE_CODES
+            ),
+            None,
+        )
+        color_data_code = next(
+            (
+                code
+                for code in self._unique_codes(
+                    [code for code in COLOR_DATA_CODES if code in status_map],
+                    [item.get("code", "") for item in functions],
+                    [item.get("code", "") for item in status_definitions],
+                )
+                if code in COLOR_DATA_CODES
+            ),
+            None,
+        )
+
+        return {
+            "category": specification.get("category", ""),
+            "power_supported": bool(power_codes),
+            "power_codes": power_codes,
+            "brightness_supported": brightness_code is not None,
+            "brightness_code": brightness_code,
+            "brightness_min": brightness_min,
+            "brightness_max": brightness_max,
+            "current_brightness": current_brightness,
+            "color_supported": bool(color_mode_code and color_data_code),
+            "color_mode_code": color_mode_code,
+            "color_data_code": color_data_code,
+            "functions": functions,
+            "status_definitions": status_definitions,
+            "status_map": status_map,
+        }
+
+    def send_commands(self, device_id: str, commands: list[dict[str, Any]]) -> dict[str, Any]:
+        response = self._post_commands_raw(device_id, commands)
         self._require_success(response)
         return response
 
-    def set_power_state(self, device_id: str, is_on: bool, profile: CommandProfile) -> dict[str, Any]:
-        command = {"code": profile.power_code, "value": bool(is_on)}
-        logger.debug("Sending power state %s to device %s", is_on, device_id)
-        return self.send_commands(device_id, [command])
+    def set_power_state(
+        self,
+        device_id: str,
+        is_on: bool,
+        profile: CommandProfile,
+        capabilities: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolved_capabilities = capabilities or self.get_device_capabilities(device_id)
+        power_codes = self._unique_codes(
+            [profile.power_code] if profile.power_code in resolved_capabilities.get("power_codes", []) else [],
+            list(resolved_capabilities.get("power_codes", [])),
+        )
+        if not power_codes:
+            raise TuyaApiError("This device does not expose a supported power switch datapoint.")
 
-    def set_fixed_color(self, device_id: str, color: RGBColor, profile: CommandProfile) -> dict[str, Any]:
+        last_response: dict[str, Any] | None = None
+        attempted_codes: list[str] = []
+        for power_code in power_codes:
+            attempted_codes.append(power_code)
+            logger.debug("Sending power state %s to device %s using %s", is_on, device_id, power_code)
+            response = self._post_commands_raw(device_id, [{"code": power_code, "value": bool(is_on)}])
+            if response and response.get("success"):
+                return {
+                    "response": response,
+                    "power_code": power_code,
+                    "attempted_codes": attempted_codes,
+                }
+            last_response = response
+            if response and response.get("code") != 2008:
+                self._require_success(response)
+
+        raise TuyaApiError(
+            "No supported power command succeeded for this device. "
+            f"Attempted datapoints: {', '.join(attempted_codes)}. Last response: {last_response}"
+        )
+
+    def set_brightness(
+        self,
+        device_id: str,
+        level: int,
+        capabilities: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolved_capabilities = capabilities or self.get_device_capabilities(device_id)
+        brightness_code = resolved_capabilities.get("brightness_code")
+        if not brightness_code:
+            raise TuyaApiError("This device does not expose a supported brightness datapoint.")
+
+        clamped_level = max(0, min(int(level), 100))
+        min_value = int(resolved_capabilities.get("brightness_min", 0))
+        max_value = int(resolved_capabilities.get("brightness_max", 255))
+        if max_value <= min_value:
+            target_value = max_value
+        else:
+            target_value = round(min_value + ((max_value - min_value) * (clamped_level / 100.0)))
+        response = self._post_commands_raw(
+            device_id,
+            [{"code": brightness_code, "value": target_value}],
+        )
+        self._require_success(response)
+        return {
+            "response": response,
+            "brightness_code": brightness_code,
+            "target_value": target_value,
+            "level": clamped_level,
+        }
+
+    def set_fixed_color(
+        self,
+        device_id: str,
+        color: RGBColor,
+        profile: CommandProfile,
+        capabilities: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolved_capabilities = capabilities or self.get_device_capabilities(device_id)
+        if not resolved_capabilities.get("color_supported", True):
+            raise TuyaApiError("This device does not expose color datapoints.")
+        power_code = next(
+            iter(resolved_capabilities.get("power_codes", [])),
+            profile.power_code,
+        )
+        color_mode_code = str(resolved_capabilities.get("color_mode_code") or profile.color_mode_code)
+        color_data_code = str(resolved_capabilities.get("color_data_code") or profile.color_data_code)
         hsv = color.to_hsv().as_dict()
         commands = [
-            {"code": profile.power_code, "value": True},
-            {"code": profile.color_mode_code, "value": profile.color_mode_value},
-            {"code": profile.color_data_code, "value": hsv},
+            {"code": power_code, "value": True},
+            {"code": color_mode_code, "value": profile.color_mode_value},
+            {"code": color_data_code, "value": hsv},
         ]
         logger.debug("Sending color %s to device %s", color.as_tuple(), device_id)
-        return self.send_commands(device_id, commands)
+        response = self.send_commands(device_id, commands)
+        return {
+            "response": response,
+            "power_code": power_code,
+            "color_mode_code": color_mode_code,
+            "color_data_code": color_data_code,
+        }
 
     @staticmethod
     def _require_success(response: dict[str, Any] | None) -> None:

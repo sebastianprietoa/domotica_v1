@@ -92,6 +92,29 @@ class FakeDashboardClient:
             },
         )
 
+    def get_device_capabilities(self, device_id: str, status: DeviceStatus | None = None) -> dict:
+        return {
+            "power_supported": True,
+            "power_codes": ["switch_led"],
+            "brightness_supported": True,
+            "brightness_code": "bright_value_v2",
+            "brightness_min": 10,
+            "brightness_max": 1000,
+            "current_brightness": 400,
+            "color_supported": True,
+            "color_mode_code": "work_mode",
+            "color_data_code": "colour_data_v2",
+        }
+
+    def set_power_state(self, device_id: str, is_on: bool, profile, capabilities=None) -> dict:
+        return {"power_code": "switch_led", "response": {"success": True}}
+
+    def set_fixed_color(self, device_id: str, color, profile, capabilities=None) -> dict:
+        return {"color_data_code": "colour_data_v2", "response": {"success": True}}
+
+    def set_brightness(self, device_id: str, level: int, capabilities=None) -> dict:
+        return {"brightness_code": "bright_value_v2", "level": level, "response": {"success": True}}
+
 
 def test_list_devices_returns_normalized_cards(monkeypatch) -> None:
     monkeypatch.setattr(
@@ -145,6 +168,33 @@ def test_get_device_status_returns_friendly_fields(monkeypatch) -> None:
     assert payload["power_state"] == "on"
     assert payload["is_rgb_capable"] is True
     assert payload["reachability_label"] == "Online"
+    assert payload["brightness_supported"] is True
+    assert payload["current_brightness"] == 39
+
+
+def test_set_brightness_route_is_available(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.TuyaClient",
+        FakeDashboardClient,
+    )
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.load_tuya_credentials",
+        lambda: TuyaCredentials(
+            access_id="client-id-123456",
+            access_key="secret",
+            api_endpoint="https://example.com",
+            auth_scheme="cloud",
+        ),
+    )
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post("/api/set-brightness", json={"device_id": "device-1", "level": 55})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["device_id"] == "device-1"
+    assert payload["level"] == 55
 
 
 def test_list_devices_requires_oauth_for_app_authorization(monkeypatch) -> None:

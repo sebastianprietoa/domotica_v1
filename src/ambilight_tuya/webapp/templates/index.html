@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Ambilight Tuya Localhost v2026.04.22-5</title>
+    <title>Ambilight Tuya Localhost v2026.04.22-6</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   </head>
   <body>
@@ -18,7 +18,7 @@
           </p>
         </div>
         <div class="hero-meta">
-          <span class="build-badge">Version UI: v2026.04.22-5</span>
+          <span class="build-badge">Version UI: v2026.04.22-6</span>
           <div class="hero-stats">
             <div class="hero-stat">
               <span class="hero-stat-label">Devices</span>
@@ -47,6 +47,32 @@
         </div>
       </section>
 
+      <section class="panel quick-control-panel">
+        <div class="panel-toolbar">
+          <div>
+            <h3>Device picker</h3>
+            <p class="panel-copy">Selecciona un equipo conocido para control rapido sin pegar `device_id`.</p>
+          </div>
+        </div>
+        <div class="quick-control-grid">
+          <label>Device
+            <select id="device-picker">
+              <option value="">Select a device</option>
+            </select>
+          </label>
+          <label>Space filter
+            <select id="space-filter">
+              <option value="all">All spaces</option>
+            </select>
+          </label>
+          <div class="quick-control-actions">
+            <button type="button" data-action="picker-on">On</button>
+            <button type="button" class="button-secondary" data-action="picker-off">Off</button>
+            <button type="button" class="button-ghost" data-action="picker-refresh">Refresh selected</button>
+          </div>
+        </div>
+      </section>
+
       <details class="drawer drawer-inline">
         <summary>
           <span>Known device catalog</span>
@@ -64,6 +90,15 @@
               <label>Device name <input name="name" placeholder="Living 4" required></label>
               <label>Device ID <input name="device_id" placeholder="eb1f8a..." required></label>
               <label>Type label <input name="type_label" placeholder="RGB light | Switch | Socket"></label>
+              <label>Space
+                <select name="room">
+                  <option value="">Unassigned</option>
+                  <option value="Living Room">Living Room</option>
+                  <option value="Dormitorio">Dormitorio</option>
+                  <option value="Cocina">Cocina</option>
+                  <option value="Oficina">Oficina</option>
+                </select>
+              </label>
               <label class="checkbox"><input name="is_rgb_capable" type="checkbox"> RGB capable</label>
               <div class="actions">
                 <button type="submit">Save device</button>
@@ -105,7 +140,12 @@
           <section class="panel panel-subtle">
             <h3>Manual status lookup</h3>
             <form id="device-status-form" class="stack-form">
-              <label>Device ID <input name="device_id" placeholder="tuya-device-id" required></label>
+              <label>Device
+                <select name="device_select" data-device-select>
+                  <option value="">Select from dashboard</option>
+                </select>
+              </label>
+              <label>Manual device ID fallback <input name="device_id" placeholder="tuya-device-id"></label>
               <button type="submit">Check status</button>
             </form>
             <pre id="device-status-output">No manual status query yet.</pre>
@@ -114,7 +154,12 @@
           <section class="panel panel-subtle">
             <h3>Manual power control</h3>
             <form id="power-form" class="stack-form">
-              <label>Device ID <input name="device_id" placeholder="Optional if using zone"></label>
+              <label>Device
+                <select name="device_select" data-device-select>
+                  <option value="">Select from dashboard</option>
+                </select>
+              </label>
+              <label>Manual device ID fallback <input name="device_id" placeholder="Optional if using zone"></label>
               <label>Zone <input name="zone" placeholder="left | center | right"></label>
               <label>State
                 <select name="state">
@@ -130,12 +175,34 @@
           <section class="panel panel-subtle">
             <h3>Manual fixed color</h3>
             <form id="fixed-color-form" class="stack-form">
-              <label>Device ID <input name="device_id" placeholder="Optional if using zone"></label>
+              <label>Device
+                <select name="device_select" data-device-select>
+                  <option value="">Select from dashboard</option>
+                </select>
+              </label>
+              <label>Manual device ID fallback <input name="device_id" placeholder="Optional if using zone"></label>
               <label>Zone <input name="zone" placeholder="left | center | right"></label>
               <label>RGB <input name="rgb" value="255,80,40" required></label>
               <button type="submit">Send color</button>
             </form>
             <pre id="fixed-color-output">No color command sent yet.</pre>
+          </section>
+
+          <section class="panel panel-subtle">
+            <h3>Manual brightness</h3>
+            <form id="brightness-form" class="stack-form">
+              <label>Device
+                <select name="device_select" data-device-select>
+                  <option value="">Select from dashboard</option>
+                </select>
+              </label>
+              <label>Manual device ID fallback <input name="device_id" placeholder="tuya-device-id"></label>
+              <label>Brightness %
+                <input name="level" type="range" min="0" max="100" value="60">
+              </label>
+              <button type="submit">Apply brightness</button>
+            </form>
+            <pre id="brightness-output">No brightness command sent yet.</pre>
           </section>
 
           <section class="panel panel-subtle">

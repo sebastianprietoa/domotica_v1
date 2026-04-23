@@ -31,6 +31,23 @@ class FakeOpenAPI:
         return {"success": True}
 
     def get(self, path: str, params: dict | None = None) -> dict:
+        if path.endswith("/specification"):
+            return {
+                "success": True,
+                "result": {
+                    "category": "dj",
+                    "functions": [
+                        {"code": "switch_led", "type": "Boolean", "values": "{}"},
+                        {"code": "bright_value_v2", "type": "Integer", "values": "{\"min\":10,\"max\":1000}"},
+                        {"code": "work_mode", "type": "Enum", "values": "{\"range\":[\"white\",\"colour\"]}"},
+                        {"code": "colour_data_v2", "type": "Json", "values": "{}"},
+                    ],
+                    "status": [
+                        {"code": "switch_led", "type": "Boolean", "values": "{}"},
+                        {"code": "bright_value_v2", "type": "Integer", "values": "{\"min\":10,\"max\":1000}"},
+                    ],
+                },
+            }
         if path == "/v1.0/iot-01/associated-users/devices":
             return {
                 "success": True,
@@ -51,7 +68,13 @@ class FakeOpenAPI:
             return {"success": True, "result": [{"id": "device-1", "name": "living 2"}]}
         if path.endswith("/devices"):
             return {"success": True, "result": [{"id": "device-1"}]}
-        return {"success": True, "result": [{"code": "switch_led", "value": True}]}
+        return {
+            "success": True,
+            "result": [
+                {"code": "switch_led", "value": True},
+                {"code": "bright_value_v2", "value": 505},
+            ],
+        }
 
     def post(self, path: str, body: dict | None = None) -> dict:
         self.commands.append((path, body or {}))
@@ -118,3 +141,30 @@ def test_tuya_client_sets_power() -> None:
 
     assert client._api.commands[0][0] == "/v1.0/iot-03/devices/device-1/commands"
     assert client._api.commands[0][1]["commands"] == [{"code": "switch_led", "value": True}]
+
+
+def test_tuya_client_reads_capabilities() -> None:
+    client = TuyaClient(
+        TuyaCredentials("id", "key", "https://example.com"),
+        api_factory=FakeOpenAPI,
+    )
+
+    capabilities = client.get_device_capabilities("device-1")
+
+    assert capabilities["power_supported"] is True
+    assert capabilities["brightness_supported"] is True
+    assert capabilities["brightness_code"] == "bright_value_v2"
+    assert capabilities["current_brightness"] == 505
+    assert capabilities["color_supported"] is True
+
+
+def test_tuya_client_sets_brightness() -> None:
+    client = TuyaClient(
+        TuyaCredentials("id", "key", "https://example.com"),
+        api_factory=FakeOpenAPI,
+    )
+
+    result = client.set_brightness("device-1", 50)
+
+    assert result["brightness_code"] == "bright_value_v2"
+    assert client._api.commands[0][1]["commands"] == [{"code": "bright_value_v2", "value": 505}]
