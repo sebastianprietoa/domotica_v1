@@ -666,7 +666,8 @@ def create_app() -> Flask:
                 "preview": {
                     "rows": 4,
                     "cols": 4,
-                    "target_fps": 4,
+                    "target_fps": 8,
+                    "apply_target_fps": 4,
                     "default_monitor_index": primary_monitor.get("index") if primary_monitor else 1,
                 },
                 "monitors": monitors,

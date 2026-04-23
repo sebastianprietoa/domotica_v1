@@ -20,7 +20,7 @@ const state = {
   selectedSpace: "all",
   previewTimerId: null,
   previewBusy: false,
-  previewTargetFps: 4,
+  previewTargetFps: 8,
   previewRunning: false,
   previewMonitorIndex: 1,
   previewMonitors: [],
@@ -28,7 +28,7 @@ const state = {
   lastPreviewPayload: null,
   liveApplyRunning: false,
   liveApplyBusy: false,
-  liveApplyMinIntervalMs: 400,
+  liveApplyMinIntervalMs: 250,
   lastLiveApplyAt: 0,
 };
 
@@ -350,7 +350,8 @@ function updatePreviewStatus({ running = state.previewRunning, sampledAt = null 
     els.previewStatusPill.textContent = running ? "Preview running" : "Preview idle";
   }
   if (els.previewRatePill) {
-    els.previewRatePill.textContent = `${state.previewTargetFps} fps target`;
+    const applyFps = Math.round(1000 / state.liveApplyMinIntervalMs);
+    els.previewRatePill.textContent = `${state.previewTargetFps} fps preview · ${applyFps} fps apply`;
   }
   if (els.previewSampledPill) {
     els.previewSampledPill.textContent = sampledAt
@@ -818,6 +819,9 @@ async function refreshSystemStatus() {
     }
     if (payload.preview?.target_fps) {
       state.previewTargetFps = payload.preview.target_fps;
+    }
+    if (payload.preview?.apply_target_fps) {
+      state.liveApplyMinIntervalMs = Math.max(50, Math.round(1000 / payload.preview.apply_target_fps));
     }
     if (Array.isArray(payload.monitors)) {
       state.previewMonitors = payload.monitors;
