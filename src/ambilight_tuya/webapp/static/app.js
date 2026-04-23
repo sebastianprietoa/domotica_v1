@@ -16,6 +16,10 @@ const state = {
   lastRefreshLabel: "Never refreshed",
   selectedDeviceId: "",
   selectedSpace: "all",
+  previewTimerId: null,
+  previewBusy: false,
+  previewTargetFps: 4,
+  previewRunning: false,
 };
 
 const els = {
@@ -29,6 +33,10 @@ const els = {
   knownDeviceOutput: document.querySelector("#known-device-output"),
   devicePicker: document.querySelector("#device-picker"),
   spaceFilter: document.querySelector("#space-filter"),
+  ambilightGrid: document.querySelector("#ambilight-grid"),
+  previewStatusPill: document.querySelector("#preview-status-pill"),
+  previewRatePill: document.querySelector("#preview-rate-pill"),
+  previewSampledPill: document.querySelector("#preview-sampled-pill"),
 };
 
 const pretty = (value) => JSON.stringify(value, null, 2);
@@ -132,6 +140,29 @@ function powerBadge(powerState) {
   return `<span class="badge badge-unknown">Unknown</span>`;
 }
 
+function renderPreviewPlaceholder(message) {
+  if (!els.ambilightGrid) return;
+  els.ambilightGrid.innerHTML = `<div class="ambilight-empty">${escapeHtml(message)}</div>`;
+}
+
+function renderAmbilightGrid(payload) {
+  if (!els.ambilightGrid) return;
+  const cells = Array.isArray(payload?.cells) ? payload.cells : [];
+  if (!cells.length) {
+    renderPreviewPlaceholder("No preview cells returned yet.");
+    return;
+  }
+  els.ambilightGrid.innerHTML = cells.map((cell) => `
+    <article class="ambilight-cell" style="background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(0,0,0,0.12)), ${escapeHtml(cell.hex)};">
+      <div class="ambilight-cell-meta">
+        <span>R${cell.row + 1} / C${cell.col + 1}</span>
+        <span>#${cell.index + 1}</span>
+      </div>
+      <div class="ambilight-cell-hex">${escapeHtml(cell.hex)}</div>
+    </article>
+  `).join("");
+}
+
 function reachabilityBadge(device) {
   if (device.online === true) return `<span class="badge badge-online">Online</span>`;
   if (device.online === false) return `<span class="badge badge-offline">Offline</span>`;
@@ -210,7 +241,7 @@ function normalizeKnownDevice(device) {
     is_rgb_capable: Boolean(device.is_rgb_capable),
     supports_color: Boolean(device.is_rgb_capable),
     power_supported: device.power_supported ?? true,
-    brightness_supported: Boolean(device.brightness_supported),
+    brightness_supported: Boolean(device.brightness_supported ?? device.is_rgb_capable),
     current_brightness: Number.isFinite(device.current_brightness) ? Number(device.current_brightness) : null,
     room: String(device.room || "").trim(),
     status_map: device.status_map || {},
@@ -275,6 +306,20 @@ function updateHeroStats() {
   els.onlineCount.textContent = String(devices.filter((device) => device.online === true).length);
   els.rgbCount.textContent = String(devices.filter((device) => device.is_rgb_capable).length);
   els.lastRefreshPill.textContent = state.lastRefreshLabel;
+}
+
+function updatePreviewStatus({ running = state.previewRunning, sampledAt = null } = {}) {
+  if (els.previewStatusPill) {
+    els.previewStatusPill.textContent = running ? "Preview running" : "Preview idle";
+  }
+  if (els.previewRatePill) {
+    els.previewRatePill.textContent = `${state.previewTargetFps} fps target`;
+  }
+  if (els.previewSampledPill) {
+    els.previewSampledPill.textContent = sampledAt
+      ? `Sampled ${new Date(sampledAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
+      : "No sample yet";
+  }
 }
 
 function setDevices(devices) {
@@ -373,7 +418,7 @@ function renderDevices() {
     const sourceBadge = device.source === "manual" || device.source === "cloud+manual"
       ? `<span class="pill pill-muted">Saved</span>`
       : "";
-    const dimmerControls = device.brightness_supported
+    const dimmerControls = (device.brightness_supported || device.is_rgb_capable)
       ? `
         <section class="device-dimmer-panel">
           <div class="device-meta-row">
@@ -522,11 +567,62 @@ async function refreshDiagnostics() {
   }
 }
 
+async function refreshAmbilightPreview({ quiet = false } = {}) {
+  if (state.previewBusy) return;
+  state.previewBusy = true;
+  try {
+    const payload = await getJson("/api/ambilight-preview");
+    renderAmbilightGrid(payload);
+    updatePreviewStatus({ running: state.previewRunning, sampledAt: payload.sampled_at });
+    if (!quiet) {
+      setGlobalFeedback("Ambilight preview updated.", "success");
+    }
+  } catch (error) {
+    if (state.previewRunning && state.previewTimerId) {
+      window.clearInterval(state.previewTimerId);
+      state.previewTimerId = null;
+      state.previewRunning = false;
+    }
+    renderPreviewPlaceholder(friendlyErrorMessage(error.message));
+    updatePreviewStatus({ running: false, sampledAt: null });
+    if (!quiet) {
+      setGlobalFeedback(friendlyErrorMessage(error.message), "error");
+    }
+  } finally {
+    state.previewBusy = false;
+  }
+}
+
+async function startAmbilightPreview() {
+  if (state.previewRunning) return;
+  state.previewRunning = true;
+  updatePreviewStatus({ running: true });
+  await refreshAmbilightPreview({ quiet: true });
+  state.previewTimerId = window.setInterval(() => {
+    refreshAmbilightPreview({ quiet: true });
+  }, Math.round(1000 / state.previewTargetFps));
+  setGlobalFeedback("Ambilight preview started.", "success");
+}
+
+function stopAmbilightPreview() {
+  if (state.previewTimerId) {
+    window.clearInterval(state.previewTimerId);
+    state.previewTimerId = null;
+  }
+  state.previewRunning = false;
+  updatePreviewStatus({ running: false });
+  setGlobalFeedback("Ambilight preview stopped.", "success");
+}
+
 async function refreshSystemStatus() {
   try {
     const payload = await getJson("/api/status");
     writeOutput("#status-output", payload);
     els.oauthPill.textContent = payload.oauth?.authorized ? "OAuth active" : "OAuth idle";
+    if (payload.preview?.target_fps) {
+      state.previewTargetFps = payload.preview.target_fps;
+    }
+    updatePreviewStatus({ running: state.previewRunning });
   } catch (error) {
     writeOutput("#status-output", error.message);
   } finally {
@@ -741,6 +837,18 @@ bindAction("[data-action='refresh-status']", async () => {
   await refreshAllStatuses();
 });
 
+bindAction("[data-action='preview-start']", async () => {
+  await startAmbilightPreview();
+});
+
+bindAction("[data-action='preview-stop']", () => {
+  stopAmbilightPreview();
+});
+
+bindAction("[data-action='preview-refresh']", async () => {
+  await refreshAmbilightPreview();
+});
+
 bindAction("[data-action='picker-on']", async () => {
   if (!state.selectedDeviceId) {
     setGlobalFeedback("Select a device first.", "error");
@@ -949,6 +1057,12 @@ if (els.spaceFilter) {
   });
 }
 
+window.addEventListener("beforeunload", () => {
+  stopAmbilightPreview();
+});
+
+renderPreviewPlaceholder("Start preview to sample the main monitor.");
+updatePreviewStatus({ running: false, sampledAt: null });
 loadSavedDevicesIntoState();
 refreshDiagnostics();
 refreshSystemStatus();

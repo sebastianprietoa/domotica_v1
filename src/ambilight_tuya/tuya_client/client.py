@@ -237,37 +237,6 @@ class TuyaClient:
             status_switch_codes,
         )
 
-        brightness_code = next(
-            (
-                code
-                for code in self._unique_codes(
-                    [code for code in BRIGHTNESS_CODES if code in status_map],
-                    [item.get("code", "") for item in functions],
-                    [item.get("code", "") for item in status_definitions],
-                )
-                if code in BRIGHTNESS_CODES
-            ),
-            None,
-        )
-        brightness_definition = next(
-            (
-                item
-                for item in [*functions, *status_definitions]
-                if item.get("code") == brightness_code
-            ),
-            {},
-        )
-        brightness_values = self._parse_values_definition(brightness_definition.get("values"))
-        brightness_min = int(brightness_values.get("min", 10 if brightness_code and brightness_code.endswith("_v2") else 0))
-        brightness_max = int(brightness_values.get("max", 1000 if brightness_code and brightness_code.endswith("_v2") else 255))
-
-        current_brightness = None
-        if brightness_code and brightness_code in status_map:
-            try:
-                current_brightness = int(status_map[brightness_code])
-            except (TypeError, ValueError):
-                current_brightness = None
-
         color_mode_code = next(
             (
                 code
@@ -292,12 +261,44 @@ class TuyaClient:
             ),
             None,
         )
+        brightness_code = next(
+            (
+                code
+                for code in self._unique_codes(
+                    [code for code in BRIGHTNESS_CODES if code in status_map],
+                    [item.get("code", "") for item in functions],
+                    [item.get("code", "") for item in status_definitions],
+                )
+                if code in BRIGHTNESS_CODES
+            ),
+            None,
+        )
+        if brightness_code is None and bool(color_mode_code and color_data_code):
+            brightness_code = "bright_value_v2" if color_data_code == "colour_data_v2" else "bright_value"
+        brightness_definition = next(
+            (
+                item
+                for item in [*functions, *status_definitions]
+                if item.get("code") == brightness_code
+            ),
+            {},
+        )
+        brightness_values = self._parse_values_definition(brightness_definition.get("values"))
+        brightness_min = int(brightness_values.get("min", 10 if brightness_code and brightness_code.endswith("_v2") else 0))
+        brightness_max = int(brightness_values.get("max", 1000 if brightness_code and brightness_code.endswith("_v2") else 255))
+
+        current_brightness = None
+        if brightness_code and brightness_code in status_map:
+            try:
+                current_brightness = int(status_map[brightness_code])
+            except (TypeError, ValueError):
+                current_brightness = None
 
         return {
             "category": specification.get("category", ""),
             "power_supported": bool(power_codes),
             "power_codes": power_codes,
-            "brightness_supported": brightness_code is not None,
+            "brightness_supported": brightness_code is not None or bool(color_mode_code and color_data_code),
             "brightness_code": brightness_code,
             "brightness_min": brightness_min,
             "brightness_max": brightness_max,

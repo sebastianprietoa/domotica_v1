@@ -10,7 +10,7 @@ from typing import Any
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
-from ambilight_tuya.color_extractor import ColorExtractor
+from ambilight_tuya.color_extractor import ColorExtractor, ScreenGridPreviewExtractor
 from ambilight_tuya.config import ConfigError, load_app_config, load_project_config, load_tuya_credentials
 from ambilight_tuya.device_mapper import DeviceMapper
 from ambilight_tuya.models import AppConfig, RGBColor
@@ -160,6 +160,46 @@ class DebugLogSession:
             self._entries.clear()
 
 
+class PreviewGridSession:
+    def __init__(self, rows: int = 4, cols: int = 4) -> None:
+        self.rows = rows
+        self.cols = cols
+        self._extractor = ScreenGridPreviewExtractor(rows=rows, cols=cols)
+        self._lock = threading.Lock()
+        self._last_colors: dict[str, RGBColor] = {}
+        self._last_sampled_at: str | None = None
+
+    def sample(self, frame, smoothing_config) -> dict[str, Any]:
+        with self._lock:
+            cells = []
+            for cell in self._extractor.extract(frame):
+                key = f"r{cell.row}c{cell.col}"
+                previous = self._last_colors.get(key)
+                if previous is None:
+                    smoothed = cell.rgb
+                elif cell.rgb.distance(previous) < smoothing_config.min_color_delta:
+                    smoothed = previous
+                else:
+                    smoothed = previous.blend(cell.rgb, smoothing_config.alpha)
+                self._last_colors[key] = smoothed
+                cells.append(
+                    {
+                        "index": cell.index,
+                        "row": cell.row,
+                        "col": cell.col,
+                        "rgb": list(smoothed.as_tuple()),
+                        "hex": f"#{smoothed.r:02x}{smoothed.g:02x}{smoothed.b:02x}",
+                    }
+                )
+            self._last_sampled_at = datetime.now(UTC).isoformat()
+            return {
+                "rows": self.rows,
+                "cols": self.cols,
+                "cells": cells,
+                "sampled_at": self._last_sampled_at,
+            }
+
+
 def _parse_rgb(raw_value: str) -> RGBColor:
     parts = [int(part.strip()) for part in raw_value.split(",")]
     if len(parts) != 3:
@@ -275,6 +315,8 @@ def _capability_snapshot(
     brightness_max = resolved_capabilities.get("brightness_max")
     brightness_percent = _current_brightness_percent(status_map, brightness_min, brightness_max)
     is_rgb_capable = _guess_rgb_capability(raw_device, status_map)
+    if is_rgb_capable:
+        brightness_supported = True
     color_supported = bool(resolved_capabilities.get("color_supported")) or is_rgb_capable
     return {
         "power_supported": bool(power_codes),
@@ -377,6 +419,7 @@ def create_app() -> Flask:
     sync_session = SyncSession()
     oauth_session = OAuthSession()
     debug_log_session = DebugLogSession()
+    preview_session = PreviewGridSession(rows=4, cols=4)
 
     def _record_debug(event: str, details: dict[str, Any]) -> None:
         debug_log_session.add(event, details)
@@ -422,6 +465,7 @@ def create_app() -> Flask:
                 "oauth": oauth_session.status(),
                 "oauth_callback_url": _oauth_callback_url(),
                 "debug_log_count": len(debug_log_session.list()),
+                "preview": {"rows": 4, "cols": 4, "target_fps": 4},
                 "monitors": list_monitors(),
             }
         )
@@ -649,6 +693,32 @@ def create_app() -> Flask:
                 "samples": _serialize_samples(samples),
             }
         )
+
+    @app.get("/api/ambilight-preview")
+    def api_ambilight_preview():
+        app_config = load_project_config()
+        monitor_index_raw = request.args.get("monitor_index", "").strip()
+        monitor_index = int(monitor_index_raw) if monitor_index_raw else app_config.capture.monitor_index
+        capture_config = replace(app_config.capture, monitor_index=monitor_index)
+        capture = ScreenCaptureService(capture_config)
+        try:
+            frame = capture.capture_frame()
+            payload = preview_session.sample(frame, app_config.smoothing)
+        except Exception as exc:
+            _record_debug(
+                "preview.grid.error",
+                {"monitor_index": monitor_index, "error": str(exc)},
+            )
+            raise ValueError("No fue posible capturar la vista previa de pantalla.")
+
+        payload.update(
+            {
+                "monitor_index": monitor_index,
+                "frame_shape": list(frame.shape),
+                "monitors": list_monitors(),
+            }
+        )
+        return jsonify(payload)
 
     @app.post("/api/sync/start")
     def api_sync_start():

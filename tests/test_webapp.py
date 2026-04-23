@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import numpy as np
+
+from ambilight_tuya.models import AppConfig, CaptureConfig, ColorExtractionConfig, SmoothingConfig
 from ambilight_tuya.models import DeviceStatus
 from ambilight_tuya.models import TuyaCredentials
 from ambilight_tuya.webapp.app import _parse_rgb, create_app
@@ -195,6 +198,43 @@ def test_set_brightness_route_is_available(monkeypatch) -> None:
     payload = response.get_json()
     assert payload["device_id"] == "device-1"
     assert payload["level"] == 55
+
+
+def test_ambilight_preview_returns_4x4_grid(monkeypatch) -> None:
+    frame = np.zeros((40, 40, 3), dtype=np.uint8)
+    frame[:20, :20] = [255, 0, 0]
+    frame[:20, 20:] = [0, 255, 0]
+    frame[20:, :20] = [0, 0, 255]
+    frame[20:, 20:] = [255, 255, 0]
+
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.load_project_config",
+        lambda: AppConfig(
+            capture=CaptureConfig(monitor_index=1, downsample=1, target_fps=8),
+            extraction=ColorExtractionConfig(),
+            smoothing=SmoothingConfig(alpha=0.35, min_update_interval_ms=150, min_color_delta=10.0),
+        ),
+    )
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.list_monitors",
+        lambda: [{"left": 0, "top": 0, "width": 40, "height": 40}],
+    )
+    monkeypatch.setattr(
+        "ambilight_tuya.webapp.app.ScreenCaptureService.capture_frame",
+        lambda self: frame,
+    )
+    app = create_app()
+    client = app.test_client()
+
+    response = client.get("/api/ambilight-preview")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["rows"] == 4
+    assert payload["cols"] == 4
+    assert len(payload["cells"]) == 16
+    assert payload["cells"][0]["hex"].startswith("#")
+    assert payload["monitor_index"] == 1
 
 
 def test_list_devices_requires_oauth_for_app_authorization(monkeypatch) -> None:

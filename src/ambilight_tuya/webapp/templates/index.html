@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Ambilight Tuya Localhost v2026.04.22-6</title>
+    <title>Ambilight Tuya Localhost v2026.04.22-7</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   </head>
   <body>
@@ -18,7 +18,7 @@
           </p>
         </div>
         <div class="hero-meta">
-          <span class="build-badge">Version UI: v2026.04.22-6</span>
+          <span class="build-badge">Version UI: v2026.04.22-7</span>
           <div class="hero-stats">
             <div class="hero-stat">
               <span class="hero-stat-label">Devices</span>
@@ -70,6 +70,29 @@
             <button type="button" class="button-secondary" data-action="picker-off">Off</button>
             <button type="button" class="button-ghost" data-action="picker-refresh">Refresh selected</button>
           </div>
+        </div>
+      </section>
+
+      <section class="panel ambilight-preview-panel">
+        <div class="panel-toolbar">
+          <div>
+            <p class="section-kicker">Ambilight preview</p>
+            <h2>Live Screen Color Grid</h2>
+            <p class="panel-copy">Vista 4x4 en tiempo casi real del monitor principal para validar captura, color y estabilidad antes de mapear a las luces.</p>
+          </div>
+          <div class="actions">
+            <button type="button" data-action="preview-start">Start preview</button>
+            <button type="button" class="button-secondary" data-action="preview-stop">Stop preview</button>
+            <button type="button" class="button-ghost" data-action="preview-refresh">Refresh once</button>
+          </div>
+        </div>
+        <div class="preview-meta-row">
+          <span class="pill" id="preview-status-pill">Preview idle</span>
+          <span class="pill pill-muted" id="preview-rate-pill">4 fps target</span>
+          <span class="pill pill-muted" id="preview-sampled-pill">No sample yet</span>
+        </div>
+        <div class="ambilight-grid" id="ambilight-grid" aria-live="polite">
+          <div class="ambilight-empty">Start preview to sample the main monitor.</div>
         </div>
       </section>
 
