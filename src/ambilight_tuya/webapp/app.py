@@ -11,8 +11,10 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 from ambilight_tuya.color_extractor import ColorExtractor, ScreenGridPreviewExtractor
-from ambilight_tuya.config import ConfigError, load_app_config, load_project_config, load_tuya_credentials
+from ambilight_tuya.config import ConfigError, load_hue_credentials, load_project_config, load_tuya_credentials
+from ambilight_tuya.config.state_store import DashboardStateStore
 from ambilight_tuya.device_mapper import DeviceMapper
+from ambilight_tuya.hue_client import HueApiError, HueClient
 from ambilight_tuya.models import AppConfig, RGBColor
 from ambilight_tuya.screen_capture import ScreenCaptureService, list_monitors
 from ambilight_tuya.sync_engine import AmbilightSyncEngine
@@ -32,6 +34,17 @@ CATEGORY_LABELS = {
     "kt": "Air conditioner",
     "qn": "Heater",
     "wk": "Thermostat",
+}
+PROVIDER_LABELS = {
+    "tuya": "Tuya",
+    "hue": "Hue",
+}
+HUE_CATEGORY_HINTS = {
+    "Color light": ("light", "Hue color light", True),
+    "Extended color light": ("light", "Hue color light", True),
+    "Dimmable light": ("light", "Hue dimmable light", False),
+    "On/Off plug-in unit": ("socket", "Hue smart plug", False),
+    "On/Off light": ("light", "Hue light", False),
 }
 
 
@@ -229,6 +242,22 @@ def _short_device_id(device_id: str) -> str:
     return f"{device_id[:6]}...{device_id[-4:]}"
 
 
+def _normalize_provider(raw_provider: str | None) -> str:
+    provider = str(raw_provider or "tuya").strip().lower()
+    return provider if provider in {"tuya", "hue"} else "tuya"
+
+
+def _device_key(provider: str, device_id: str) -> str:
+    return f"{provider}:{device_id}"
+
+
+def _split_device_key(device_key: str) -> tuple[str, str]:
+    if ":" not in device_key:
+        return "tuya", device_key
+    provider, device_id = device_key.split(":", 1)
+    return _normalize_provider(provider), device_id
+
+
 def _status_items_to_map(status_items: list[dict[str, Any]] | None) -> dict[str, Any]:
     if not status_items:
         return {}
@@ -284,6 +313,13 @@ def _extract_room_name(raw_device: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_hue_room_name(raw_device: dict[str, Any]) -> str | None:
+    room = raw_device.get("room")
+    if isinstance(room, str) and room.strip():
+        return room.strip()
+    return None
+
+
 def _current_brightness_percent(
     status_map: dict[str, Any],
     min_value: int | None = None,
@@ -309,21 +345,42 @@ def _capability_snapshot(
     raw_device: dict[str, Any],
     status_map: dict[str, Any],
     capabilities: dict[str, Any] | None = None,
+    provider: str = "tuya",
 ) -> dict[str, Any]:
     resolved_capabilities = capabilities or {}
     power_codes = list(resolved_capabilities.get("power_codes", []))
-    if not power_codes:
-        power_codes = [code for code in POWER_CODES if code in status_map]
     brightness_supported = bool(resolved_capabilities.get("brightness_supported"))
-    if not brightness_supported:
-        brightness_supported = any(code in status_map for code in BRIGHTNESS_CODES)
     brightness_min = resolved_capabilities.get("brightness_min")
     brightness_max = resolved_capabilities.get("brightness_max")
-    brightness_percent = _current_brightness_percent(status_map, brightness_min, brightness_max)
-    is_rgb_capable = _guess_rgb_capability(raw_device, status_map)
-    if is_rgb_capable:
-        brightness_supported = True
-    color_supported = bool(resolved_capabilities.get("color_supported")) or is_rgb_capable
+    is_rgb_capable = bool(resolved_capabilities.get("color_supported"))
+    color_supported = bool(resolved_capabilities.get("color_supported"))
+    brightness_percent = None
+
+    if provider == "tuya":
+        if not power_codes:
+            power_codes = [code for code in POWER_CODES if code in status_map]
+        if not brightness_supported:
+            brightness_supported = any(code in status_map for code in BRIGHTNESS_CODES)
+        brightness_percent = _current_brightness_percent(status_map, brightness_min, brightness_max)
+        is_rgb_capable = _guess_rgb_capability(raw_device, status_map)
+        if is_rgb_capable:
+            brightness_supported = True
+        color_supported = bool(resolved_capabilities.get("color_supported")) or is_rgb_capable
+    else:
+        if not power_codes and resolved_capabilities.get("power_supported"):
+            power_codes = ["on"]
+        if brightness_supported:
+            try:
+                current_brightness = int(resolved_capabilities.get("current_brightness"))
+            except (TypeError, ValueError):
+                current_brightness = None
+            if current_brightness is not None:
+                brightness_percent = round((current_brightness / 254) * 100)
+        type_hint = str(raw_device.get("type", "")).strip()
+        if type_hint in HUE_CATEGORY_HINTS:
+            is_rgb_capable = HUE_CATEGORY_HINTS[type_hint][2]
+            color_supported = HUE_CATEGORY_HINTS[type_hint][2]
+
     return {
         "power_supported": bool(power_codes),
         "power_codes": power_codes,
@@ -345,9 +402,11 @@ def _normalize_device_record(
     status_map: dict[str, Any] | None = None,
     capabilities: dict[str, Any] | None = None,
     room: str | None = None,
+    provider: str = "tuya",
 ) -> dict[str, Any]:
     resolved_status_map = status_map or _status_items_to_map(raw_device.get("status"))
     category = str(raw_device.get("category", "")).lower()
+    type_hint = str(raw_device.get("type", "")).strip()
     name = (
         str(raw_device.get("name") or raw_device.get("custom_name") or "").strip()
         or f"Device {_short_device_id(str(raw_device.get('id', 'unknown')))}"
@@ -360,34 +419,53 @@ def _normalize_device_record(
     else:
         online = None
     power_state = _derive_power_state(resolved_status_map)
-    capability_snapshot = _capability_snapshot(raw_device, resolved_status_map, capabilities)
+    if provider == "hue":
+        if online is None:
+            online = bool(resolved_status_map.get("reachable", True))
+        power_state = "on" if bool(resolved_status_map.get("on")) else "off"
+    capability_snapshot = _capability_snapshot(raw_device, resolved_status_map, capabilities, provider=provider)
     product_name = str(raw_device.get("product_name") or "").strip()
+    if provider == "hue":
+        hint_category, hint_label, _ = HUE_CATEGORY_HINTS.get(type_hint, ("light", type_hint or "Hue light", False))
+        category = category or hint_category
+        product_name = product_name or str(raw_device.get("modelid") or "").strip()
+        resolved_room = room or _extract_hue_room_name(raw_device)
+        type_label = hint_label
+    else:
+        resolved_room = room or _extract_room_name(raw_device)
+        type_label = CATEGORY_LABELS.get(category, product_name or "Tuya device")
     return {
         "id": str(raw_device.get("id", "")).strip(),
+        "provider": provider,
+        "provider_label": PROVIDER_LABELS.get(provider, provider.title()),
+        "device_key": _device_key(provider, str(raw_device.get("id", "")).strip()),
         "short_id": _short_device_id(str(raw_device.get("id", "")).strip()),
         "name": name,
         "category": category or "unknown",
-        "type_label": CATEGORY_LABELS.get(category, product_name or "Tuya device"),
+        "type_label": type_label,
         "product_name": product_name,
         "online": online,
         "reachability_label": "Online" if online is True else "Offline" if online is False else "Unknown",
         "power_state": power_state,
         "state_label": power_state.title(),
-        "room": room or _extract_room_name(raw_device),
+        "room": resolved_room,
         "status_map": resolved_status_map,
         "raw": raw_device,
         **capability_snapshot,
     }
 
 
-def _serialize_device_status(status, capabilities: dict[str, Any] | None = None) -> dict[str, Any]:
+def _serialize_device_status(status, capabilities: dict[str, Any] | None = None, provider: str = "tuya") -> dict[str, Any]:
     payload = asdict(status)
     status_map = dict(status.raw.get("status_map", {}))
     payload["status_map"] = status_map
     payload["power_state"] = status.raw.get("power_state", _derive_power_state(status_map))
     payload["reachability_label"] = "Online" if status.online else "Offline"
     payload["state_label"] = payload["power_state"].title()
-    payload.update(_capability_snapshot({"id": status.device_id}, status_map, capabilities))
+    payload["provider"] = provider
+    payload["provider_label"] = PROVIDER_LABELS.get(provider, provider.title())
+    payload["device_key"] = _device_key(provider, status.device_id)
+    payload.update(_capability_snapshot({"id": status.device_id}, status_map, capabilities, provider=provider))
     return payload
 
 
@@ -411,6 +489,21 @@ def _friendly_tuya_message(error_message: str, default_message: str) -> str:
     return default_message
 
 
+def _friendly_hue_message(error_message: str, default_message: str) -> str:
+    text = str(error_message)
+    if "unauthorized user" in text.lower():
+        return "La Hue Bridge rechazo la application key configurada."
+    if "not reachable" in text.lower():
+        return "La luz Hue aparece no alcanzable desde el bridge."
+    return default_message
+
+
+def _friendly_provider_message(provider: str, error_message: str, default_message: str) -> str:
+    if provider == "hue":
+        return _friendly_hue_message(error_message, default_message)
+    return _friendly_tuya_message(error_message, default_message)
+
+
 def _fetch_capabilities_safe(client: TuyaClient, device_id: str, status=None) -> dict[str, Any]:
     try:
         return client.get_device_capabilities(device_id, status=status)
@@ -426,6 +519,7 @@ def create_app() -> Flask:
     oauth_session = OAuthSession()
     debug_log_session = DebugLogSession()
     preview_session = PreviewGridSession(rows=4, cols=4)
+    state_store = DashboardStateStore()
 
     def _record_debug(event: str, details: dict[str, Any]) -> None:
         debug_log_session.add(event, details)
@@ -459,6 +553,96 @@ def create_app() -> Flask:
             )
         return client
 
+    def _get_hue_client(required: bool = False) -> HueClient | None:
+        credentials = load_hue_credentials()
+        if credentials is None:
+            if required:
+                raise HueApiError("Hue Bridge is not configured. Add HUE_BRIDGE_IP and HUE_APPLICATION_KEY to .env.")
+            return None
+        client = HueClient(credentials)
+        _record_debug("hue.client.created", {"hue": client.debug_snapshot()})
+        return client
+
+    def _resolve_provider_device(payload: dict[str, Any]) -> tuple[str, str]:
+        raw_device_key = str(payload.get("device_key", "")).strip()
+        if raw_device_key:
+            provider, device_id = _split_device_key(raw_device_key)
+            if device_id:
+                return provider, device_id
+        provider = _normalize_provider(payload.get("provider"))
+        device_id = str(payload.get("device_id", "")).strip()
+        return provider, device_id
+
+    def _list_hue_devices() -> list[dict[str, Any]]:
+        client = _get_hue_client(required=False)
+        if client is None:
+            return []
+        lights = client.list_lights()
+        devices: list[dict[str, Any]] = []
+        for light in lights:
+            capabilities = client.get_light_capabilities(light["id"], light=light)
+            devices.append(
+                _normalize_device_record(
+                    {
+                        "id": light["id"],
+                        "name": light["name"],
+                        "type": light.get("type"),
+                        "product_name": light.get("productname", ""),
+                        "modelid": light.get("modelid", ""),
+                        "room": light.get("room"),
+                        "online": bool(light.get("state", {}).get("reachable", True)),
+                    },
+                    status_map=dict(light.get("state", {})),
+                    capabilities=capabilities,
+                    room=light.get("room"),
+                    provider="hue",
+                )
+            )
+        return devices
+
+    def _fetch_unified_devices() -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        devices: list[dict[str, Any]] = []
+        warnings: list[dict[str, str]] = []
+
+        try:
+            tuya_client = _get_tuya_client(prefer_user_oauth=True)
+            raw_devices = tuya_client.list_devices()
+            devices.extend(_normalize_device_record(raw_device) for raw_device in raw_devices)
+            _record_debug("tuya.list_devices.success", {"device_count": len(raw_devices), "tuya": tuya_client.debug_snapshot()})
+        except Exception as exc:
+            warnings.append({"provider": "tuya", "message": _friendly_tuya_message(str(exc), "No fue posible cargar dispositivos Tuya.")})
+            _record_debug("tuya.list_devices.error", {"error": str(exc)})
+
+        try:
+            hue_devices = _list_hue_devices()
+            if hue_devices:
+                devices.extend(hue_devices)
+                hue_client = _get_hue_client(required=False)
+                if hue_client is not None:
+                    _record_debug("hue.list_devices.success", {"device_count": len(hue_devices), "hue": hue_client.debug_snapshot()})
+        except Exception as exc:
+            warnings.append({"provider": "hue", "message": _friendly_hue_message(str(exc), "No fue posible cargar luces Hue.")})
+            _record_debug("hue.list_devices.error", {"error": str(exc)})
+
+        devices.sort(key=lambda item: (item["room"] or "zzz", item["name"].lower(), item["provider"], item["id"]))
+        return devices, warnings
+
+    def _apply_color_to_device(provider: str, device_id: str, color: RGBColor) -> dict[str, Any]:
+        if provider == "hue":
+            client = _get_hue_client(required=True)
+            assert client is not None
+            return client.set_fixed_color(device_id, color)
+        app_config = load_project_config()
+        client = _get_tuya_client(prefer_user_oauth=True)
+        status = client.get_device_status(device_id)
+        capabilities = _fetch_capabilities_safe(client, device_id, status=status)
+        return client.set_fixed_color(
+            device_id,
+            color,
+            app_config.command_profiles["default"],
+            capabilities=capabilities,
+        )
+
     @app.get("/")
     def index() -> str:
         return render_template("index.html")
@@ -467,12 +651,18 @@ def create_app() -> Flask:
     def api_status():
         monitors = list_monitors()
         primary_monitor = next((monitor for monitor in monitors if monitor.get("is_primary")), monitors[0] if monitors else None)
+        hue_client = _get_hue_client(required=False)
         return jsonify(
             {
                 "sync": sync_session.status(),
                 "oauth": oauth_session.status(),
                 "oauth_callback_url": _oauth_callback_url(),
                 "debug_log_count": len(debug_log_session.list()),
+                "ambilight_mapping_count": len(state_store.get_ambilight_mapping()),
+                "hue": {
+                    "configured": hue_client is not None,
+                    "bridge_ip": hue_client.credentials.bridge_ip if hue_client is not None else None,
+                },
                 "preview": {
                     "rows": 4,
                     "cols": 4,
@@ -494,32 +684,40 @@ def create_app() -> Flask:
 
     @app.post("/api/list-devices")
     def api_list_devices():
-        client = _get_tuya_client(prefer_user_oauth=True)
-        try:
-            raw_devices = client.list_devices()
-        except Exception as exc:
-            _record_debug(
-                "tuya.list_devices.error",
-                {"error": str(exc), "tuya": client.debug_snapshot()},
-            )
-            raise ValueError(_friendly_tuya_message(str(exc), "No fue posible cargar el catalogo de dispositivos."))
-        devices = [
-            _normalize_device_record(raw_device)
-            for raw_device in raw_devices
-        ]
-        devices.sort(key=lambda item: (item["name"].lower(), item["id"]))
-        _record_debug(
-            "tuya.list_devices.success",
-            {"device_count": len(devices), "tuya": client.debug_snapshot()},
+        devices, warnings = _fetch_unified_devices()
+        return jsonify(
+            {
+                "devices": devices,
+                "count": len(devices),
+                "warnings": warnings,
+                "mapping": state_store.get_ambilight_mapping(),
+            }
         )
-        return jsonify({"devices": devices, "count": len(devices)})
 
     @app.post("/api/get-device-status")
     def api_get_device_status():
         payload = request.get_json(silent=True) or {}
-        device_id = str(payload.get("device_id", "")).strip()
+        provider, device_id = _resolve_provider_device(payload)
         if not device_id:
             raise ValueError("device_id is required")
+        if provider == "hue":
+            client = _get_hue_client(required=True)
+            assert client is not None
+            try:
+                status = client.get_light_status(device_id)
+                capabilities = client.get_light_capabilities(device_id, light=status.raw.get("light"))
+            except Exception as exc:
+                _record_debug(
+                    "hue.get_device_status.error",
+                    {"device_id": device_id, "error": str(exc), "hue": client.debug_snapshot()},
+                )
+                raise ValueError(_friendly_hue_message(str(exc), "No fue posible consultar el estado de la luz Hue."))
+            _record_debug(
+                "hue.get_device_status.success",
+                {"device_id": device_id, "hue": client.debug_snapshot()},
+            )
+            return jsonify(_serialize_device_status(status, capabilities, provider="hue"))
+
         client = _get_tuya_client(prefer_user_oauth=True)
         try:
             status = client.get_device_status(device_id)
@@ -534,17 +732,39 @@ def create_app() -> Flask:
             "tuya.get_device_status.success",
             {"device_id": device_id, "tuya": client.debug_snapshot()},
         )
-        return jsonify(_serialize_device_status(status, capabilities))
+        return jsonify(_serialize_device_status(status, capabilities, provider="tuya"))
 
     @app.post("/api/set-fixed-color")
     def api_set_fixed_color():
         payload = request.get_json(silent=True) or {}
-        device_id = str(payload.get("device_id", "")).strip()
+        provider, device_id = _resolve_provider_device(payload)
         zone = str(payload.get("zone", "")).strip()
         rgb = _parse_rgb(str(payload.get("rgb", "")).strip())
-        _, app_config = load_app_config()
-        client = _get_tuya_client(prefer_user_oauth=True)
         if device_id:
+            if provider == "hue":
+                client = _get_hue_client(required=True)
+                assert client is not None
+                try:
+                    result = client.set_fixed_color(device_id, rgb)
+                except Exception as exc:
+                    _record_debug(
+                        "hue.set_fixed_color.error",
+                        {
+                            "device_id": device_id,
+                            "rgb": rgb.as_tuple(),
+                            "error": str(exc),
+                            "hue": client.debug_snapshot(),
+                        },
+                    )
+                    raise ValueError(_friendly_hue_message(str(exc), "No fue posible aplicar color a esta luz Hue."))
+                _record_debug(
+                    "hue.set_fixed_color.success",
+                    {"device_id": device_id, "rgb": rgb.as_tuple(), "hue": client.debug_snapshot()},
+                )
+                return jsonify({"provider": "hue", "device_id": device_id, "result": result})
+
+            app_config = load_project_config()
+            client = _get_tuya_client(prefer_user_oauth=True)
             try:
                 status = client.get_device_status(device_id)
                 capabilities = _fetch_capabilities_safe(client, device_id, status=status)
@@ -569,9 +789,11 @@ def create_app() -> Flask:
                 "tuya.set_fixed_color.success",
                 {"device_id": device_id, "rgb": rgb.as_tuple(), "tuya": client.debug_snapshot()},
             )
-            return jsonify({"device_id": device_id, "result": result})
+            return jsonify({"provider": "tuya", "device_id": device_id, "result": result})
         if not zone:
             raise ValueError("device_id or zone is required")
+        app_config = load_project_config()
+        client = _get_tuya_client(prefer_user_oauth=True)
         routing = DeviceMapper(app_config).resolve(zone)
         if routing is None or not routing.device_ids:
             raise ValueError(f"No devices configured for zone {zone}")
@@ -601,15 +823,32 @@ def create_app() -> Flask:
     @app.post("/api/set-power")
     def api_set_power():
         payload = request.get_json(silent=True) or {}
-        device_id = str(payload.get("device_id", "")).strip()
+        provider, device_id = _resolve_provider_device(payload)
         zone = str(payload.get("zone", "")).strip()
         state_raw = str(payload.get("state", "")).strip().lower()
         if state_raw not in {"on", "off"}:
             raise ValueError("state must be 'on' or 'off'")
         is_on = state_raw == "on"
-        _, app_config = load_app_config()
-        client = _get_tuya_client(prefer_user_oauth=True)
         if device_id:
+            if provider == "hue":
+                client = _get_hue_client(required=True)
+                assert client is not None
+                try:
+                    result = client.set_power_state(device_id, is_on)
+                except Exception as exc:
+                    _record_debug(
+                        "hue.set_power.error",
+                        {"device_id": device_id, "state": state_raw, "error": str(exc), "hue": client.debug_snapshot()},
+                    )
+                    raise ValueError(_friendly_hue_message(str(exc), "No fue posible cambiar el estado de energia en Hue."))
+                _record_debug(
+                    "hue.set_power.success",
+                    {"device_id": device_id, "state": state_raw, "hue": client.debug_snapshot()},
+                )
+                return jsonify({"provider": "hue", "device_id": device_id, "state": state_raw, "result": result})
+
+            app_config = load_project_config()
+            client = _get_tuya_client(prefer_user_oauth=True)
             try:
                 status = client.get_device_status(device_id)
                 capabilities = _fetch_capabilities_safe(client, device_id, status=status)
@@ -629,9 +868,11 @@ def create_app() -> Flask:
                 "tuya.set_power.success",
                 {"device_id": device_id, "state": state_raw, "tuya": client.debug_snapshot()},
             )
-            return jsonify({"device_id": device_id, "state": state_raw, "result": result})
+            return jsonify({"provider": "tuya", "device_id": device_id, "state": state_raw, "result": result})
         if not zone:
             raise ValueError("device_id or zone is required")
+        app_config = load_project_config()
+        client = _get_tuya_client(prefer_user_oauth=True)
         routing = DeviceMapper(app_config).resolve(zone)
         if routing is None or not routing.device_ids:
             raise ValueError(f"No devices configured for zone {zone}")
@@ -661,7 +902,7 @@ def create_app() -> Flask:
     @app.post("/api/set-brightness")
     def api_set_brightness():
         payload = request.get_json(silent=True) or {}
-        device_id = str(payload.get("device_id", "")).strip()
+        provider, device_id = _resolve_provider_device(payload)
         if not device_id:
             raise ValueError("device_id is required")
         try:
@@ -669,6 +910,23 @@ def create_app() -> Flask:
         except (TypeError, ValueError):
             raise ValueError("level must be an integer between 0 and 100")
         level = max(0, min(level, 100))
+        if provider == "hue":
+            client = _get_hue_client(required=True)
+            assert client is not None
+            try:
+                result = client.set_brightness(device_id, level)
+            except Exception as exc:
+                _record_debug(
+                    "hue.set_brightness.error",
+                    {"device_id": device_id, "level": level, "error": str(exc), "hue": client.debug_snapshot()},
+                )
+                raise ValueError(_friendly_hue_message(str(exc), "No fue posible ajustar el brillo en Hue."))
+            _record_debug(
+                "hue.set_brightness.success",
+                {"device_id": device_id, "level": level, "result": result, "hue": client.debug_snapshot()},
+            )
+            return jsonify({"provider": "hue", "device_id": device_id, "level": level, "result": result})
+
         client = _get_tuya_client(prefer_user_oauth=True)
         try:
             status = client.get_device_status(device_id)
@@ -684,7 +942,7 @@ def create_app() -> Flask:
             "tuya.set_brightness.success",
             {"device_id": device_id, "level": level, "result": result, "tuya": client.debug_snapshot()},
         )
-        return jsonify({"device_id": device_id, "level": level, "result": result})
+        return jsonify({"provider": "tuya", "device_id": device_id, "level": level, "result": result})
 
     @app.post("/api/screen-sample")
     def api_screen_sample():
@@ -746,10 +1004,110 @@ def create_app() -> Flask:
                     "width": monitor_metadata.get("width"),
                     "height": monitor_metadata.get("height"),
                 },
+                "mapping": state_store.get_ambilight_mapping(),
                 "monitors": monitors,
             }
         )
         return jsonify(payload)
+
+    @app.get("/api/ambilight-mapping")
+    def api_get_ambilight_mapping():
+        devices, warnings = _fetch_unified_devices()
+        color_devices = [
+            {
+                "device_key": device["device_key"],
+                "provider": device["provider"],
+                "device_id": device["id"],
+                "name": device["name"],
+                "provider_label": device["provider_label"],
+                "room": device.get("room"),
+                "type_label": device["type_label"],
+                "online": device.get("online"),
+            }
+            for device in devices
+            if device.get("supports_color") or device.get("is_rgb_capable")
+        ]
+        return jsonify(
+            {
+                "mapping": state_store.get_ambilight_mapping(),
+                "devices": color_devices,
+                "warnings": warnings,
+            }
+        )
+
+    @app.post("/api/ambilight-mapping")
+    def api_set_ambilight_mapping():
+        payload = request.get_json(silent=True) or {}
+        raw_mapping = payload.get("mapping", {})
+        if not isinstance(raw_mapping, dict):
+            raise ValueError("mapping must be an object keyed by cell id")
+        cleaned = state_store.save_ambilight_mapping(raw_mapping)
+        _record_debug("preview.mapping.saved", {"mapping_count": len(cleaned)})
+        return jsonify({"mapping": cleaned, "count": len(cleaned)})
+
+    @app.post("/api/ambilight/apply-preview-frame")
+    def api_apply_preview_frame():
+        payload = request.get_json(silent=True) or {}
+        mapping = state_store.get_ambilight_mapping()
+        if not mapping:
+            raise ValueError("No hay celdas mapeadas para aplicar.")
+
+        cells = payload.get("cells")
+        if not isinstance(cells, list) or not cells:
+            preview_payload = api_ambilight_preview().get_json()
+            cells = preview_payload.get("cells", [])
+
+        cells_by_key = {
+            f"r{cell.get('row')}c{cell.get('col')}": cell
+            for cell in cells
+            if isinstance(cell, dict)
+        }
+        applied: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for cell_key, target in mapping.items():
+            cell = cells_by_key.get(cell_key)
+            if cell is None:
+                skipped.append({"cell": cell_key, "reason": "cell_not_present"})
+                continue
+            provider = _normalize_provider(target.get("provider"))
+            device_id = str(target.get("device_id", "")).strip()
+            if not device_id:
+                skipped.append({"cell": cell_key, "reason": "device_missing"})
+                continue
+            try:
+                color = RGBColor(*cell.get("rgb", [0, 0, 0]))
+                result = _apply_color_to_device(provider, device_id, color)
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "cell": cell_key,
+                        "provider": provider,
+                        "device_id": device_id,
+                        "reason": _friendly_provider_message(provider, str(exc), "No fue posible aplicar color."),
+                    }
+                )
+                continue
+            applied.append(
+                {
+                    "cell": cell_key,
+                    "provider": provider,
+                    "device_id": device_id,
+                    "rgb": cell.get("rgb"),
+                    "hex": cell.get("hex"),
+                    "result": result,
+                }
+            )
+        _record_debug(
+            "preview.frame.applied",
+            {"applied_count": len(applied), "skipped_count": len(skipped)},
+        )
+        return jsonify(
+            {
+                "applied": applied,
+                "skipped": skipped,
+                "mapping_count": len(mapping),
+            }
+        )
 
     @app.post("/api/sync/start")
     def api_sync_start():
@@ -823,6 +1181,7 @@ def create_app() -> Flask:
         )
 
     @app.errorhandler(ConfigError)
+    @app.errorhandler(HueApiError)
     @app.errorhandler(TuyaApiError)
     @app.errorhandler(ValueError)
     @app.errorhandler(RuntimeError)

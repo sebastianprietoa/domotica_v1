@@ -147,6 +147,8 @@ def test_list_devices_returns_normalized_cards(monkeypatch) -> None:
     payload = response.get_json()
     assert payload["count"] == 1
     assert payload["devices"][0]["name"] == "Living 4"
+    assert payload["devices"][0]["provider"] == "tuya"
+    assert payload["devices"][0]["device_key"] == "tuya:device-1"
     assert payload["devices"][0]["is_rgb_capable"] is True
     assert payload["devices"][0]["power_state"] == "on"
 
@@ -173,6 +175,8 @@ def test_get_device_status_returns_friendly_fields(monkeypatch) -> None:
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["device_id"] == "device-1"
+    assert payload["provider"] == "tuya"
+    assert payload["device_key"] == "tuya:device-1"
     assert payload["power_state"] == "on"
     assert payload["is_rgb_capable"] is True
     assert payload["reachability_label"] == "Online"

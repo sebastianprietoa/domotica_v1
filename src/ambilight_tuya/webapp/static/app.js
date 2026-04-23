@@ -9,12 +9,14 @@ const COLOR_PRESETS = [
 const KNOWN_DEVICES_STORAGE_KEY = "ambilight_tuya_known_devices";
 const DEVICE_SPACES_STORAGE_KEY = "ambilight_tuya_device_spaces";
 const DEFAULT_SPACES = ["Living Room", "Dormitorio", "Cocina", "Oficina", "Sin espacio"];
+const BRIGHTNESS_DEBOUNCE_MS = 180;
 
 const state = {
   devices: [],
   busyDevices: new Set(),
+  brightnessTimers: new Map(),
   lastRefreshLabel: "Never refreshed",
-  selectedDeviceId: "",
+  selectedDeviceKey: "",
   selectedSpace: "all",
   previewTimerId: null,
   previewBusy: false,
@@ -22,6 +24,12 @@ const state = {
   previewRunning: false,
   previewMonitorIndex: 1,
   previewMonitors: [],
+  previewMapping: {},
+  lastPreviewPayload: null,
+  liveApplyRunning: false,
+  liveApplyBusy: false,
+  liveApplyMinIntervalMs: 400,
+  lastLiveApplyAt: 0,
 };
 
 const els = {
@@ -32,6 +40,7 @@ const els = {
   rgbCount: document.querySelector("#rgb-count"),
   lastRefreshPill: document.querySelector("#last-refresh-pill"),
   oauthPill: document.querySelector("#oauth-pill"),
+  huePill: document.querySelector("#hue-pill"),
   knownDeviceOutput: document.querySelector("#known-device-output"),
   devicePicker: document.querySelector("#device-picker"),
   spaceFilter: document.querySelector("#space-filter"),
@@ -41,6 +50,7 @@ const els = {
   previewSampledPill: document.querySelector("#preview-sampled-pill"),
   previewMonitorSelect: document.querySelector("#preview-monitor-select"),
   previewMonitorPill: document.querySelector("#preview-monitor-pill"),
+  previewApplyPill: document.querySelector("#preview-apply-pill"),
 };
 
 const pretty = (value) => JSON.stringify(value, null, 2);
@@ -85,16 +95,6 @@ function writeOutput(selector, payload) {
   target.textContent = typeof payload === "string" ? payload : pretty(payload);
 }
 
-function setGlobalFeedback(message, tone = "default") {
-  if (!message) {
-    els.globalFeedback.className = "feedback-banner is-hidden";
-    els.globalFeedback.textContent = "";
-    return;
-  }
-  els.globalFeedback.className = `feedback-banner${tone === "error" ? " is-error" : tone === "success" ? " is-success" : ""}`;
-  els.globalFeedback.textContent = message;
-}
-
 function bindAction(selector, handler) {
   const node = document.querySelector(selector);
   if (node) node.addEventListener("click", handler);
@@ -109,6 +109,16 @@ function bindForm(selector, handler) {
   });
 }
 
+function setGlobalFeedback(message, tone = "default") {
+  if (!message) {
+    els.globalFeedback.className = "feedback-banner is-hidden";
+    els.globalFeedback.textContent = "";
+    return;
+  }
+  els.globalFeedback.className = `feedback-banner${tone === "error" ? " is-error" : tone === "success" ? " is-success" : ""}`;
+  els.globalFeedback.textContent = message;
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -118,10 +128,36 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function deviceKey(provider, deviceId) {
+  return `${provider}:${deviceId}`;
+}
+
+function splitDeviceKey(rawValue) {
+  const text = String(rawValue || "").trim();
+  if (!text.includes(":")) {
+    return { provider: "tuya", deviceId: text, deviceKey: deviceKey("tuya", text) };
+  }
+  const [provider, ...rest] = text.split(":");
+  const deviceId = rest.join(":");
+  return {
+    provider: provider || "tuya",
+    deviceId,
+    deviceKey: deviceKey(provider || "tuya", deviceId),
+  };
+}
+
+function getDeviceByKey(rawDeviceKey) {
+  return state.devices.find((device) => device.device_key === rawDeviceKey);
+}
+
+function formatNowLabel(prefix) {
+  return `${prefix} ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
 function friendlyErrorMessage(message) {
   const text = String(message || "");
   if (text.includes("1106") || text.includes("permission deny")) {
-    return "Tuya bloqueo el discovery de este usuario. Puedes seguir usando los dispositivos guardados localmente.";
+    return "Tuya bloqueo el discovery de este usuario. Puedes seguir usando dispositivos guardados o proveedores alternos.";
   }
   if (text.includes("2008") || text.includes("command or value not support")) {
     return "Este dispositivo no acepta ese comando con su perfil actual.";
@@ -129,11 +165,11 @@ function friendlyErrorMessage(message) {
   if (text.includes("brightness datapoint")) {
     return "Este dispositivo no ofrece control de brillo.";
   }
-  if (text.includes("power switch datapoint")) {
-    return "Este dispositivo no expone un switch compatible para control remoto.";
+  if (text.includes("Hue Bridge is not configured")) {
+    return "Hue Bridge no esta configurado todavia en el backend.";
   }
-  if (text.includes("color datapoints")) {
-    return "Este dispositivo no soporta color.";
+  if (text.includes("Hue Bridge request failed")) {
+    return "Hue Bridge rechazo el comando o no respondio como se esperaba.";
   }
   return text;
 }
@@ -144,43 +180,14 @@ function powerBadge(powerState) {
   return `<span class="badge badge-unknown">Unknown</span>`;
 }
 
-function renderPreviewPlaceholder(message) {
-  if (!els.ambilightGrid) return;
-  els.ambilightGrid.innerHTML = `<div class="ambilight-empty">${escapeHtml(message)}</div>`;
-}
-
-function renderAmbilightGrid(payload) {
-  if (!els.ambilightGrid) return;
-  const cells = Array.isArray(payload?.cells) ? payload.cells : [];
-  if (!cells.length) {
-    renderPreviewPlaceholder("No preview cells returned yet.");
-    return;
-  }
-  els.ambilightGrid.innerHTML = cells.map((cell) => `
-    <article class="ambilight-cell" style="background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(0,0,0,0.12)), ${escapeHtml(cell.hex)};">
-      <div class="ambilight-cell-meta">
-        <span>R${cell.row + 1} / C${cell.col + 1}</span>
-        <span>#${cell.index + 1}</span>
-      </div>
-      <div class="ambilight-cell-hex">${escapeHtml(cell.hex)}</div>
-    </article>
-  `).join("");
-}
-
-function updatePreviewMonitorOptions(monitors = state.previewMonitors) {
-  if (!els.previewMonitorSelect) return;
-  const options = monitors.map((monitor) => {
-    const label = `Monitor ${monitor.index}${monitor.is_primary ? " (Primary)" : ""} - ${monitor.width}x${monitor.height}`;
-    const selected = Number(monitor.index) === Number(state.previewMonitorIndex) ? " selected" : "";
-    return `<option value="${escapeHtml(monitor.index)}"${selected}>${escapeHtml(label)}</option>`;
-  }).join("");
-  els.previewMonitorSelect.innerHTML = options || '<option value="1">Monitor 1</option>';
-}
-
 function reachabilityBadge(device) {
   if (device.online === true) return `<span class="badge badge-online">Online</span>`;
   if (device.online === false) return `<span class="badge badge-offline">Offline</span>`;
   return `<span class="badge badge-unknown">Reachability unknown</span>`;
+}
+
+function providerBadge(device) {
+  return `<span class="pill provider-badge provider-${escapeHtml(device.provider || "tuya")}">${escapeHtml(device.provider_label || device.provider || "Provider")}</span>`;
 }
 
 function defaultStatusMessage(device) {
@@ -218,10 +225,10 @@ function saveDeviceSpaces(deviceSpaces) {
   window.localStorage.setItem(DEVICE_SPACES_STORAGE_KEY, JSON.stringify(deviceSpaces));
 }
 
-function setDeviceSpace(deviceId, room) {
+function setDeviceSpace(deviceKeyValue, room) {
   const nextSpaces = loadDeviceSpaces();
-  if (!room || room === "Sin espacio") delete nextSpaces[deviceId];
-  else nextSpaces[deviceId] = room;
+  if (!room || room === "Sin espacio") delete nextSpaces[deviceKeyValue];
+  else nextSpaces[deviceKeyValue] = room;
   saveDeviceSpaces(nextSpaces);
 }
 
@@ -229,7 +236,7 @@ function applyLocalSpaces(devices) {
   const deviceSpaces = loadDeviceSpaces();
   return devices.map((device) => ({
     ...device,
-    room: deviceSpaces[device.id] || device.room || "",
+    room: deviceSpaces[device.device_key] || device.room || "",
   }));
 }
 
@@ -241,8 +248,13 @@ function availableSpaces(devices = state.devices) {
 }
 
 function normalizeKnownDevice(device) {
+  const provider = String(device.provider || "tuya").trim().toLowerCase() || "tuya";
+  const id = String(device.id || device.device_id || "").trim();
   return {
-    id: String(device.id || device.device_id || "").trim(),
+    id,
+    provider,
+    provider_label: provider === "hue" ? "Hue" : "Tuya",
+    device_key: device.device_key || deviceKey(provider, id),
     short_id: String(device.short_id || "").trim() || null,
     name: String(device.name || "Saved device").trim(),
     category: String(device.category || "manual").trim(),
@@ -253,7 +265,7 @@ function normalizeKnownDevice(device) {
     power_state: device.power_state || "unknown",
     state_label: device.state_label || "Unknown",
     is_rgb_capable: Boolean(device.is_rgb_capable),
-    supports_color: Boolean(device.is_rgb_capable),
+    supports_color: Boolean(device.supports_color ?? device.is_rgb_capable),
     power_supported: device.power_supported ?? true,
     brightness_supported: Boolean(device.brightness_supported ?? device.is_rgb_capable),
     current_brightness: Number.isFinite(device.current_brightness) ? Number(device.current_brightness) : null,
@@ -269,30 +281,25 @@ function normalizeKnownDevice(device) {
 function mergeKnownDevices(cloudDevices, knownDevices) {
   const merged = new Map();
   cloudDevices.forEach((device) => {
-    merged.set(device.id, { ...device, source: device.source || "cloud" });
+    merged.set(device.device_key, { ...device, source: device.source || "cloud" });
   });
   knownDevices.forEach((knownDevice) => {
     const normalizedKnown = normalizeKnownDevice(knownDevice);
-    const existing = merged.get(normalizedKnown.id);
+    const existing = merged.get(normalizedKnown.device_key);
     if (existing) {
-      merged.set(normalizedKnown.id, {
+      merged.set(normalizedKnown.device_key, {
         ...normalizedKnown,
         ...existing,
-        name: existing.name || normalizedKnown.name,
-        type_label: existing.type_label || normalizedKnown.type_label,
-        product_name: existing.product_name || normalizedKnown.product_name,
-        is_rgb_capable: existing.is_rgb_capable ?? normalizedKnown.is_rgb_capable,
-        supports_color: existing.supports_color ?? normalizedKnown.is_rgb_capable,
         room: existing.room || normalizedKnown.room,
         source: "cloud+manual",
       });
     } else {
-      merged.set(normalizedKnown.id, normalizedKnown);
+      merged.set(normalizedKnown.device_key, normalizedKnown);
     }
   });
   return applyLocalSpaces(Array.from(merged.values())).sort((left, right) => {
-    const leftKey = `${left.name}`.toLowerCase();
-    const rightKey = `${right.name}`.toLowerCase();
+    const leftKey = `${left.room || ""} ${left.name}`.toLowerCase();
+    const rightKey = `${right.room || ""} ${right.name}`.toLowerCase();
     return leftKey.localeCompare(rightKey);
   });
 }
@@ -302,11 +309,14 @@ function syncKnownDevicesFromState() {
     .filter((device) => device.source === "manual" || device.source === "cloud+manual")
     .map((device) => ({
       id: device.id,
+      provider: device.provider,
+      device_key: device.device_key,
       name: device.name,
       type_label: device.type_label,
       category: device.category,
       product_name: device.product_name,
       is_rgb_capable: device.is_rgb_capable,
+      supports_color: device.supports_color,
       brightness_supported: device.brightness_supported,
       room: device.room || "",
     }));
@@ -314,12 +324,25 @@ function syncKnownDevicesFromState() {
   writeOutput("#known-device-output", { devices: savedDevices, count: savedDevices.length });
 }
 
+function colorCapableDevices() {
+  return state.devices.filter((device) => device.supports_color || device.is_rgb_capable);
+}
+
 function updateHeroStats() {
-  const devices = state.devices;
-  els.deviceCount.textContent = String(devices.length);
-  els.onlineCount.textContent = String(devices.filter((device) => device.online === true).length);
-  els.rgbCount.textContent = String(devices.filter((device) => device.is_rgb_capable).length);
+  els.deviceCount.textContent = String(state.devices.length);
+  els.onlineCount.textContent = String(state.devices.filter((device) => device.online === true).length);
+  els.rgbCount.textContent = String(colorCapableDevices().length);
   els.lastRefreshPill.textContent = state.lastRefreshLabel;
+}
+
+function updatePreviewMonitorOptions(monitors = state.previewMonitors) {
+  if (!els.previewMonitorSelect) return;
+  const options = monitors.map((monitor) => {
+    const label = `Monitor ${monitor.index}${monitor.is_primary ? " (Primary)" : ""} - ${monitor.width}x${monitor.height}`;
+    const selected = Number(monitor.index) === Number(state.previewMonitorIndex) ? " selected" : "";
+    return `<option value="${escapeHtml(monitor.index)}"${selected}>${escapeHtml(label)}</option>`;
+  }).join("");
+  els.previewMonitorSelect.innerHTML = options || '<option value="1">Monitor 1</option>';
 }
 
 function updatePreviewStatus({ running = state.previewRunning, sampledAt = null } = {}) {
@@ -336,43 +359,47 @@ function updatePreviewStatus({ running = state.previewRunning, sampledAt = null 
   }
   if (els.previewMonitorPill) {
     const currentMonitor = state.previewMonitors.find((monitor) => Number(monitor.index) === Number(state.previewMonitorIndex));
-    if (currentMonitor) {
-      els.previewMonitorPill.textContent = `Source M${currentMonitor.index}${currentMonitor.is_primary ? " primary" : ""}`;
-    } else {
-      els.previewMonitorPill.textContent = `Source M${state.previewMonitorIndex}`;
-    }
+    els.previewMonitorPill.textContent = currentMonitor
+      ? `Source M${currentMonitor.index}${currentMonitor.is_primary ? " primary" : ""}`
+      : `Source M${state.previewMonitorIndex}`;
+  }
+  if (els.previewApplyPill) {
+    els.previewApplyPill.textContent = state.liveApplyRunning ? "Live apply active" : "Live apply idle";
   }
 }
 
 function setDevices(devices) {
   state.devices = devices.map((device) => ({
     ...device,
+    device_key: device.device_key || deviceKey(device.provider || "tuya", device.id),
+    provider: device.provider || "tuya",
+    provider_label: device.provider_label || (device.provider === "hue" ? "Hue" : "Tuya"),
     room: device.room || "",
     statusMessage: device.statusMessage || defaultStatusMessage(device),
     feedbackTone: device.feedbackTone || "default",
   }));
-  if (!state.devices.some((device) => device.id === state.selectedDeviceId)) {
-    state.selectedDeviceId = state.devices[0]?.id || "";
+  if (!state.devices.some((device) => device.device_key === state.selectedDeviceKey)) {
+    state.selectedDeviceKey = state.devices[0]?.device_key || "";
   }
   renderDevices();
 }
 
 function updateDeviceSelectors() {
   const options = state.devices.map((device) => `
-    <option value="${escapeHtml(device.id)}"${state.selectedDeviceId === device.id ? " selected" : ""}>
-      ${escapeHtml(`${device.name} · ${device.short_id || device.id} · ${device.type_label || "Tuya device"} · ${device.reachability_label || "Unknown"}`)}
+    <option value="${escapeHtml(device.device_key)}"${state.selectedDeviceKey === device.device_key ? " selected" : ""}>
+      ${escapeHtml(`${device.provider_label} · ${device.name} · ${device.short_id || device.id} · ${device.type_label || "Device"} · ${device.reachability_label || "Unknown"}`)}
     </option>
   `).join("");
 
   if (els.devicePicker) {
     els.devicePicker.innerHTML = `<option value="">Select a device</option>${options}`;
-    els.devicePicker.value = state.selectedDeviceId || "";
+    els.devicePicker.value = state.selectedDeviceKey || "";
   }
 
   document.querySelectorAll("[data-device-select]").forEach((select) => {
     const currentValue = select.value;
     select.innerHTML = `<option value="">Select from dashboard</option>${options}`;
-    select.value = state.devices.some((device) => device.id === currentValue) ? currentValue : state.selectedDeviceId || "";
+    select.value = state.devices.some((device) => device.device_key === currentValue) ? currentValue : state.selectedDeviceKey || "";
   });
 
   if (els.spaceFilter) {
@@ -384,6 +411,57 @@ function updateDeviceSelectors() {
   }
 }
 
+function renderPreviewPlaceholder(message) {
+  if (!els.ambilightGrid) return;
+  els.ambilightGrid.innerHTML = `<div class="ambilight-empty">${escapeHtml(message)}</div>`;
+}
+
+function renderAmbilightGrid(payload) {
+  if (!els.ambilightGrid) return;
+  const cells = Array.isArray(payload?.cells) ? payload.cells : [];
+  if (!cells.length) {
+    renderPreviewPlaceholder("No preview cells returned yet.");
+    return;
+  }
+
+  const mappingOptions = colorCapableDevices().map((device) => `
+    <option value="${escapeHtml(device.device_key)}">${escapeHtml(`${device.provider_label} · ${device.name}`)}</option>
+  `).join("");
+
+  els.ambilightGrid.innerHTML = cells.map((cell) => {
+    const cellKey = `r${cell.row}c${cell.col}`;
+    const mapping = state.previewMapping[cellKey] || null;
+    const mappedKey = mapping ? deviceKey(mapping.provider, mapping.device_id) : "";
+    const mappedDevice = mappedKey ? getDeviceByKey(mappedKey) : null;
+    return `
+      <article class="ambilight-cell" style="background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(0,0,0,0.12)), ${escapeHtml(cell.hex)};">
+        <div class="ambilight-cell-meta">
+          <span>R${cell.row + 1} / C${cell.col + 1}</span>
+          <span>#${cell.index + 1}</span>
+        </div>
+        <div class="ambilight-cell-hex">${escapeHtml(cell.hex)}</div>
+        <div class="ambilight-cell-assignment">
+          <label class="ambilight-cell-label">Target device</label>
+          <select data-cell-mapping="${escapeHtml(cellKey)}">
+            <option value="">Unmapped</option>
+            ${mappingOptions}
+          </select>
+          <div class="ambilight-cell-assigned">${escapeHtml(mappedDevice ? `${mappedDevice.provider_label} · ${mappedDevice.name}` : "No device mapped")}</div>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  document.querySelectorAll("[data-cell-mapping]").forEach((select) => {
+    const cellKey = select.dataset.cellMapping;
+    const mapping = state.previewMapping[cellKey];
+    select.value = mapping ? deviceKey(mapping.provider, mapping.device_id) : "";
+    select.addEventListener("change", async () => {
+      await updateCellMapping(cellKey, select.value);
+    });
+  });
+}
+
 function renderDevices() {
   updateHeroStats();
   updateDeviceSelectors();
@@ -393,7 +471,7 @@ function renderDevices() {
       <article class="empty-state">
         <div>
           <h3>No devices available</h3>
-          <p>Try <strong>Refresh devices</strong>, or add known device IDs in the local catalog above.</p>
+          <p>Try <strong>Refresh devices</strong>. If discovery is blocked, you can still use saved devices or Hue devices.</p>
         </div>
       </article>
     `;
@@ -403,6 +481,7 @@ function renderDevices() {
   const visibleDevices = state.selectedSpace === "all"
     ? state.devices
     : state.devices.filter((device) => (device.room || "Sin espacio") === state.selectedSpace);
+
   if (!visibleDevices.length) {
     els.deviceGrid.innerHTML = `
       <article class="empty-state">
@@ -434,112 +513,112 @@ function renderDevices() {
       </div>
       <div class="device-group-grid">
         ${devices.map((device) => {
-    const isBusy = state.busyDevices.has(device.id);
-    const powerDisabled = isBusy || device.power_supported === false;
-    const statusText = device.statusMessage || defaultStatusMessage(device);
-    const sourceBadge = device.source === "manual" || device.source === "cloud+manual"
-      ? `<span class="pill pill-muted">Saved</span>`
-      : "";
-    const dimmerControls = (device.brightness_supported || device.is_rgb_capable)
-      ? `
-        <section class="device-dimmer-panel">
-          <div class="device-meta-row">
-            <strong>Brightness</strong>
-            <span class="pill pill-muted">${device.current_brightness ?? 0}%</span>
-          </div>
-          <div class="dimmer-row">
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value="${escapeHtml(device.current_brightness ?? 50)}"
-              data-device-brightness-input="${escapeHtml(device.id)}"
-              ${isBusy ? "disabled" : ""}
-            >
-            <button type="button" class="button-ghost" data-device-brightness-apply="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>Apply</button>
-          </div>
-        </section>
-      `
-      : "";
-    const colorControls = device.is_rgb_capable
-      ? `
-        <section class="device-color-panel">
-          <div class="device-meta-row">
-            <strong>Color presets</strong>
-            <span class="pill pill-muted">RGB enabled</span>
-          </div>
-          <div class="color-presets">
-            ${COLOR_PRESETS.map((preset) => `
-              <button
-                type="button"
-                class="color-chip"
-                data-color="${preset.key}"
-                data-device-color="${escapeHtml(device.id)}"
-                data-rgb="${preset.rgb}"
-                title="${preset.label}"
-                ${isBusy ? "disabled" : ""}
-              ></button>
-            `).join("")}
-          </div>
-          <div class="color-input-row">
-            <input type="text" value="255,80,40" data-custom-color-input="${escapeHtml(device.id)}" aria-label="Custom RGB value for ${escapeHtml(device.name)}">
-            <button type="button" data-device-custom-color="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>Apply color</button>
-          </div>
-        </section>
-      `
-      : "";
-    const removeButton = (device.source === "manual" || device.source === "cloud+manual")
-      ? `<button type="button" class="button-ghost" data-device-remove="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>Forget saved device</button>`
-      : "";
-    const roomOptions = availableSpaces(state.devices).map((space) => {
-      const selected = (device.room || "Sin espacio") === space ? " selected" : "";
-      return `<option value="${escapeHtml(space)}"${selected}>${escapeHtml(space)}</option>`;
-    }).join("");
+          const isBusy = state.busyDevices.has(device.device_key);
+          const powerDisabled = isBusy || device.power_supported === false;
+          const statusText = device.statusMessage || defaultStatusMessage(device);
+          const sourceBadge = device.source === "manual" || device.source === "cloud+manual"
+            ? `<span class="pill pill-muted">Saved</span>`
+            : "";
+          const roomOptions = availableSpaces(state.devices).map((space) => {
+            const selected = (device.room || "Sin espacio") === space ? " selected" : "";
+            return `<option value="${escapeHtml(space)}"${selected}>${escapeHtml(space)}</option>`;
+          }).join("");
+          const dimmerControls = (device.brightness_supported || device.is_rgb_capable)
+            ? `
+              <section class="device-dimmer-panel">
+                <div class="device-meta-row">
+                  <strong>Brightness</strong>
+                  <span class="pill pill-muted" data-device-brightness-label="${escapeHtml(device.device_key)}">${device.current_brightness ?? 0}%</span>
+                </div>
+                <div class="dimmer-row">
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value="${escapeHtml(device.current_brightness ?? 50)}"
+                    data-device-brightness-input="${escapeHtml(device.device_key)}"
+                    ${isBusy ? "disabled" : ""}
+                  >
+                </div>
+              </section>
+            `
+            : "";
+          const colorControls = device.is_rgb_capable
+            ? `
+              <section class="device-color-panel">
+                <div class="device-meta-row">
+                  <strong>Color presets</strong>
+                  <span class="pill pill-muted">RGB enabled</span>
+                </div>
+                <div class="color-presets">
+                  ${COLOR_PRESETS.map((preset) => `
+                    <button
+                      type="button"
+                      class="color-chip"
+                      data-color="${preset.key}"
+                      data-device-color="${escapeHtml(device.device_key)}"
+                      data-rgb="${preset.rgb}"
+                      title="${preset.label}"
+                      ${isBusy ? "disabled" : ""}
+                    ></button>
+                  `).join("")}
+                </div>
+                <div class="color-input-row">
+                  <input type="text" value="255,80,40" data-custom-color-input="${escapeHtml(device.device_key)}" aria-label="Custom RGB value for ${escapeHtml(device.name)}">
+                  <button type="button" data-device-custom-color="${escapeHtml(device.device_key)}" ${isBusy ? "disabled" : ""}>Apply color</button>
+                </div>
+              </section>
+            `
+            : "";
+          const removeButton = (device.source === "manual" || device.source === "cloud+manual")
+            ? `<button type="button" class="button-ghost" data-device-remove="${escapeHtml(device.device_key)}" ${isBusy ? "disabled" : ""}>Forget saved device</button>`
+            : "";
 
-    return `
-      <article class="device-card" data-device-card="${escapeHtml(device.id)}">
-        <div class="device-top">
-          <div class="device-meta-row">
-            <div class="device-badge-stack">
-              <span class="pill">${escapeHtml(device.type_label || "Tuya device")}</span>
-              ${sourceBadge}
-            </div>
-            ${reachabilityBadge(device)}
-          </div>
-          <div>
-            <h3 class="device-name">${escapeHtml(device.name)}</h3>
-            <p class="device-subtitle">${escapeHtml(device.product_name || device.category || "Connected device")}</p>
-          </div>
-          <div class="device-meta-row">
-            <span class="device-id">${escapeHtml(device.short_id || device.id)}</span>
-            ${powerBadge(device.power_state)}
-          </div>
-        </div>
+          return `
+            <article class="device-card" data-device-card="${escapeHtml(device.device_key)}">
+              <div class="device-top">
+                <div class="device-meta-row">
+                  <div class="device-badge-stack">
+                    ${providerBadge(device)}
+                    <span class="pill">${escapeHtml(device.type_label || "Device")}</span>
+                    ${sourceBadge}
+                  </div>
+                  ${reachabilityBadge(device)}
+                </div>
+                <div>
+                  <h3 class="device-name">${escapeHtml(device.name)}</h3>
+                  <p class="device-subtitle">${escapeHtml(device.product_name || device.category || "Connected device")}</p>
+                </div>
+                <div class="device-meta-row">
+                  <span class="device-id">${escapeHtml(device.short_id || device.id)}</span>
+                  ${powerBadge(device.power_state)}
+                </div>
+              </div>
 
-        <div class="device-actions">
-          <button type="button" data-device-on="${escapeHtml(device.id)}" ${powerDisabled ? "disabled" : ""}>On</button>
-          <button type="button" class="button-off" data-device-off="${escapeHtml(device.id)}" ${powerDisabled ? "disabled" : ""}>Off</button>
-          <button type="button" class="button-ghost" data-device-refresh="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>Refresh</button>
-          ${removeButton}
-        </div>
+              <div class="device-actions">
+                <button type="button" data-device-on="${escapeHtml(device.device_key)}" ${powerDisabled ? "disabled" : ""}>On</button>
+                <button type="button" class="button-off" data-device-off="${escapeHtml(device.device_key)}" ${powerDisabled ? "disabled" : ""}>Off</button>
+                <button type="button" class="button-ghost" data-device-refresh="${escapeHtml(device.device_key)}" ${isBusy ? "disabled" : ""}>Refresh</button>
+                ${removeButton}
+              </div>
 
-        <div class="device-inline-selects">
-          <label>Space
-            <select data-device-room="${escapeHtml(device.id)}" ${isBusy ? "disabled" : ""}>
-              ${roomOptions}
-            </select>
-          </label>
-        </div>
+              <div class="device-inline-selects">
+                <label>Space
+                  <select data-device-room="${escapeHtml(device.device_key)}" ${isBusy ? "disabled" : ""}>
+                    ${roomOptions}
+                  </select>
+                </label>
+              </div>
 
-        ${dimmerControls}
-        ${colorControls}
+              ${dimmerControls}
+              ${colorControls}
 
-        <div class="device-footer">
-          <div class="device-feedback ${device.feedbackTone ? `is-${device.feedbackTone}` : ""}">${escapeHtml(statusText)}</div>
-        </div>
-      </article>
-    `;
-  }).join("")}
+              <div class="device-footer">
+                <div class="device-feedback ${device.feedbackTone ? `is-${device.feedbackTone}` : ""}">${escapeHtml(statusText)}</div>
+              </div>
+            </article>
+          `;
+        }).join("")}
       </div>
     </section>
   `).join("");
@@ -547,24 +626,23 @@ function renderDevices() {
   bindDeviceCardActions();
 }
 
-function mergeDeviceUpdate(deviceId, patch) {
+function mergeDeviceUpdate(deviceKeyValue, patch) {
   state.devices = state.devices.map((device) => (
-    device.id === deviceId ? { ...device, ...patch } : device
+    device.device_key === deviceKeyValue ? { ...device, ...patch } : device
   ));
 }
 
-function withDeviceBusy(deviceId, isBusy) {
-  if (isBusy) state.busyDevices.add(deviceId);
-  else state.busyDevices.delete(deviceId);
+function withDeviceBusy(deviceKeyValue, isBusy) {
+  if (isBusy) state.busyDevices.add(deviceKeyValue);
+  else state.busyDevices.delete(deviceKeyValue);
   renderDevices();
-}
-
-function formatNowLabel(prefix) {
-  return `${prefix} ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 function normalizeStatusPayload(payload, previousDevice = {}) {
   return {
+    provider: payload.provider || previousDevice.provider || "tuya",
+    provider_label: payload.provider_label || previousDevice.provider_label || "Tuya",
+    device_key: payload.device_key || previousDevice.device_key,
     online: payload.online,
     reachability_label: payload.reachability_label,
     power_state: payload.power_state || previousDevice.power_state || "unknown",
@@ -589,11 +667,80 @@ async function refreshDiagnostics() {
   }
 }
 
+async function refreshAmbilightMapping({ quiet = true } = {}) {
+  try {
+    const payload = await getJson("/api/ambilight-mapping");
+    state.previewMapping = payload.mapping || {};
+    if (!quiet && payload.warnings?.length) {
+      setGlobalFeedback(payload.warnings[0].message, "error");
+    }
+    if (state.lastPreviewPayload) {
+      renderAmbilightGrid(state.lastPreviewPayload);
+    }
+  } catch (error) {
+    if (!quiet) setGlobalFeedback(friendlyErrorMessage(error.message), "error");
+  }
+}
+
+async function updateCellMapping(cellKey, value) {
+  const nextMapping = { ...state.previewMapping };
+  if (!value) {
+    delete nextMapping[cellKey];
+  } else {
+    const target = splitDeviceKey(value);
+    nextMapping[cellKey] = { provider: target.provider, device_id: target.deviceId };
+  }
+  try {
+    const payload = await postJson("/api/ambilight-mapping", { mapping: nextMapping });
+    state.previewMapping = payload.mapping || {};
+    if (state.lastPreviewPayload) {
+      renderAmbilightGrid(state.lastPreviewPayload);
+    }
+    setGlobalFeedback("Ambilight mapping saved.", "success");
+  } catch (error) {
+    setGlobalFeedback(friendlyErrorMessage(error.message), "error");
+  } finally {
+    await refreshDiagnostics();
+    await refreshSystemStatus();
+  }
+}
+
+async function applyCurrentPreviewFrame({ quiet = false } = {}) {
+  if (state.liveApplyBusy) return;
+  const now = Date.now();
+  if (quiet && now - state.lastLiveApplyAt < state.liveApplyMinIntervalMs) {
+    return;
+  }
+  if (!state.lastPreviewPayload?.cells?.length) {
+    if (!quiet) setGlobalFeedback("Capture a preview frame first.", "error");
+    return;
+  }
+  state.liveApplyBusy = true;
+  try {
+    const payload = await postJson("/api/ambilight/apply-preview-frame", {
+      monitor_index: state.previewMonitorIndex,
+      cells: state.lastPreviewPayload.cells,
+    });
+    state.lastLiveApplyAt = Date.now();
+    if (!quiet) {
+      if (payload.applied?.length) setGlobalFeedback(`Applied ${payload.applied.length} mapped cell${payload.applied.length === 1 ? "" : "s"}.`, "success");
+      else setGlobalFeedback("No mapped cells were applied.", "error");
+    }
+  } catch (error) {
+    if (!quiet) setGlobalFeedback(friendlyErrorMessage(error.message), "error");
+  } finally {
+    state.liveApplyBusy = false;
+    await refreshDiagnostics();
+  }
+}
+
 async function refreshAmbilightPreview({ quiet = false } = {}) {
   if (state.previewBusy) return;
   state.previewBusy = true;
   try {
     const payload = await getJson(`/api/ambilight-preview?monitor_index=${encodeURIComponent(state.previewMonitorIndex)}`);
+    state.lastPreviewPayload = payload;
+    state.previewMapping = payload.mapping || state.previewMapping;
     if (Array.isArray(payload.monitors)) {
       state.previewMonitors = payload.monitors;
       updatePreviewMonitorOptions(payload.monitors);
@@ -603,7 +750,9 @@ async function refreshAmbilightPreview({ quiet = false } = {}) {
     }
     renderAmbilightGrid(payload);
     updatePreviewStatus({ running: state.previewRunning, sampledAt: payload.sampled_at });
-    if (!quiet) {
+    if (state.liveApplyRunning) {
+      await applyCurrentPreviewFrame({ quiet: true });
+    } else if (!quiet) {
       setGlobalFeedback("Ambilight preview updated.", "success");
     }
   } catch (error) {
@@ -612,11 +761,10 @@ async function refreshAmbilightPreview({ quiet = false } = {}) {
       state.previewTimerId = null;
       state.previewRunning = false;
     }
+    state.liveApplyRunning = false;
     renderPreviewPlaceholder(friendlyErrorMessage(error.message));
     updatePreviewStatus({ running: false, sampledAt: null });
-    if (!quiet) {
-      setGlobalFeedback(friendlyErrorMessage(error.message), "error");
-    }
+    if (!quiet) setGlobalFeedback(friendlyErrorMessage(error.message), "error");
   } finally {
     state.previewBusy = false;
   }
@@ -643,11 +791,31 @@ function stopAmbilightPreview() {
   setGlobalFeedback("Ambilight preview stopped.", "success");
 }
 
+async function startLiveApply() {
+  state.liveApplyRunning = true;
+  updatePreviewStatus({ running: state.previewRunning });
+  if (!state.previewRunning) {
+    await startAmbilightPreview();
+  } else {
+    await refreshAmbilightPreview({ quiet: true });
+  }
+  setGlobalFeedback("Live apply started.", "success");
+}
+
+function stopLiveApply() {
+  state.liveApplyRunning = false;
+  updatePreviewStatus({ running: state.previewRunning });
+  setGlobalFeedback("Live apply stopped.", "success");
+}
+
 async function refreshSystemStatus() {
   try {
     const payload = await getJson("/api/status");
     writeOutput("#status-output", payload);
     els.oauthPill.textContent = payload.oauth?.authorized ? "OAuth active" : "OAuth idle";
+    if (els.huePill) {
+      els.huePill.textContent = payload.hue?.configured ? `Hue ${payload.hue.bridge_ip}` : "Hue idle";
+    }
     if (payload.preview?.target_fps) {
       state.previewTargetFps = payload.preview.target_fps;
     }
@@ -683,9 +851,15 @@ async function refreshDevices() {
   const knownDevices = loadKnownDevices();
   try {
     const payload = await postJson("/api/list-devices");
+    state.previewMapping = payload.mapping || state.previewMapping;
     setDevices(mergeKnownDevices(payload.devices || [], knownDevices));
     state.lastRefreshLabel = formatNowLabel("Devices refreshed");
-    setGlobalFeedback(`Loaded ${state.devices.length} device${state.devices.length === 1 ? "" : "s"}.`, "success");
+    const warning = payload.warnings?.[0];
+    if (warning) {
+      setGlobalFeedback(`${warning.message} Loaded ${state.devices.length} visible device${state.devices.length === 1 ? "" : "s"}.`, "error");
+    } else {
+      setGlobalFeedback(`Loaded ${state.devices.length} device${state.devices.length === 1 ? "" : "s"}.`, "success");
+    }
   } catch (error) {
     const friendlyMessage = friendlyErrorMessage(error.message);
     if (knownDevices.length) {
@@ -698,23 +872,27 @@ async function refreshDevices() {
     }
   } finally {
     syncKnownDevicesFromState();
+    await refreshAmbilightMapping({ quiet: true });
     await refreshSystemStatus();
   }
 }
 
-async function refreshDeviceStatus(deviceId, { quiet = false } = {}) {
-  const device = state.devices.find((item) => item.id === deviceId);
+async function refreshDeviceStatus(deviceKeyValue, { quiet = false } = {}) {
+  const device = getDeviceByKey(deviceKeyValue);
   if (!device) return;
-  withDeviceBusy(deviceId, true);
+  withDeviceBusy(deviceKeyValue, true);
   try {
-    const payload = await postJson("/api/get-device-status", { device_id: deviceId });
-    mergeDeviceUpdate(deviceId, normalizeStatusPayload(payload, device));
+    const payload = await postJson("/api/get-device-status", {
+      provider: device.provider,
+      device_id: device.id,
+    });
+    mergeDeviceUpdate(deviceKeyValue, normalizeStatusPayload(payload, device));
     if (!quiet) setGlobalFeedback(`${device.name}: status updated.`, "success");
   } catch (error) {
-    mergeDeviceUpdate(deviceId, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
+    mergeDeviceUpdate(deviceKeyValue, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
     if (!quiet) setGlobalFeedback(`Status refresh failed for ${device.name}.`, "error");
   } finally {
-    withDeviceBusy(deviceId, false);
+    withDeviceBusy(deviceKeyValue, false);
     syncKnownDevicesFromState();
     await refreshDiagnostics();
   }
@@ -726,110 +904,135 @@ async function refreshAllStatuses() {
     return;
   }
   setGlobalFeedback("Refreshing device status...");
-  await Promise.allSettled(state.devices.map((device) => refreshDeviceStatus(device.id, { quiet: true })));
+  await Promise.allSettled(state.devices.map((device) => refreshDeviceStatus(device.device_key, { quiet: true })));
   state.lastRefreshLabel = formatNowLabel("Status refreshed");
   renderDevices();
   setGlobalFeedback("Status refresh finished.", "success");
   await refreshSystemStatus();
 }
 
-async function applyPower(deviceId, powerState) {
-  const device = state.devices.find((item) => item.id === deviceId);
+async function applyPower(deviceKeyValue, powerState) {
+  const device = getDeviceByKey(deviceKeyValue);
   if (!device) return;
-  withDeviceBusy(deviceId, true);
+  withDeviceBusy(deviceKeyValue, true);
   try {
-    await postJson("/api/set-power", { device_id: deviceId, state: powerState });
-    mergeDeviceUpdate(deviceId, {
+    await postJson("/api/set-power", { provider: device.provider, device_id: device.id, state: powerState });
+    mergeDeviceUpdate(deviceKeyValue, {
       power_state: powerState,
       state_label: powerState === "on" ? "On" : "Off",
       statusMessage: `Power ${powerState} command sent.`,
       feedbackTone: "success",
     });
     renderDevices();
-    await refreshDeviceStatus(deviceId, { quiet: true });
+    await refreshDeviceStatus(deviceKeyValue, { quiet: true });
     setGlobalFeedback(`${device.name}: power ${powerState}.`, "success");
   } catch (error) {
-    mergeDeviceUpdate(deviceId, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
+    mergeDeviceUpdate(deviceKeyValue, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
     renderDevices();
     setGlobalFeedback(`${device.name}: power command failed.`, "error");
   } finally {
-    withDeviceBusy(deviceId, false);
+    withDeviceBusy(deviceKeyValue, false);
     syncKnownDevicesFromState();
     await refreshSystemStatus();
   }
 }
 
-async function applyColor(deviceId, rgbValue) {
-  const device = state.devices.find((item) => item.id === deviceId);
+async function applyColor(deviceKeyValue, rgbValue) {
+  const device = getDeviceByKey(deviceKeyValue);
   if (!device) return;
-  withDeviceBusy(deviceId, true);
+  withDeviceBusy(deviceKeyValue, true);
   try {
-    await postJson("/api/set-fixed-color", { device_id: deviceId, rgb: rgbValue });
-    mergeDeviceUpdate(deviceId, {
+    await postJson("/api/set-fixed-color", { provider: device.provider, device_id: device.id, rgb: rgbValue });
+    mergeDeviceUpdate(deviceKeyValue, {
       power_state: "on",
       state_label: "On",
       statusMessage: `Color ${rgbValue} applied.`,
       feedbackTone: "success",
     });
     renderDevices();
-    await refreshDeviceStatus(deviceId, { quiet: true });
+    await refreshDeviceStatus(deviceKeyValue, { quiet: true });
     setGlobalFeedback(`${device.name}: color updated.`, "success");
   } catch (error) {
-    mergeDeviceUpdate(deviceId, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
+    mergeDeviceUpdate(deviceKeyValue, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
     renderDevices();
     setGlobalFeedback(`${device.name}: color command failed.`, "error");
   } finally {
-    withDeviceBusy(deviceId, false);
+    withDeviceBusy(deviceKeyValue, false);
     syncKnownDevicesFromState();
     await refreshSystemStatus();
   }
 }
 
-async function applyBrightness(deviceId, level) {
-  const device = state.devices.find((item) => item.id === deviceId);
+async function applyBrightness(deviceKeyValue, level, { quiet = false } = {}) {
+  const device = getDeviceByKey(deviceKeyValue);
   if (!device) return;
-  withDeviceBusy(deviceId, true);
+  withDeviceBusy(deviceKeyValue, true);
   try {
-    await postJson("/api/set-brightness", { device_id: deviceId, level });
-    mergeDeviceUpdate(deviceId, {
+    await postJson("/api/set-brightness", { provider: device.provider, device_id: device.id, level });
+    mergeDeviceUpdate(deviceKeyValue, {
       current_brightness: Number(level),
       statusMessage: `Brightness set to ${level}%.`,
       feedbackTone: "success",
     });
     renderDevices();
-    await refreshDeviceStatus(deviceId, { quiet: true });
-    setGlobalFeedback(`${device.name}: brightness updated.`, "success");
+    if (!quiet) setGlobalFeedback(`${device.name}: brightness updated.`, "success");
   } catch (error) {
-    mergeDeviceUpdate(deviceId, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
+    mergeDeviceUpdate(deviceKeyValue, { statusMessage: friendlyErrorMessage(error.message), feedbackTone: "error" });
     renderDevices();
-    setGlobalFeedback(`${device.name}: brightness command failed.`, "error");
+    if (!quiet) setGlobalFeedback(`${device.name}: brightness command failed.`, "error");
   } finally {
-    withDeviceBusy(deviceId, false);
+    withDeviceBusy(deviceKeyValue, false);
     syncKnownDevicesFromState();
-    await refreshSystemStatus();
+    await refreshDiagnostics();
   }
 }
 
-function assignDeviceSpace(deviceId, room) {
-  setDeviceSpace(deviceId, room);
-  mergeDeviceUpdate(deviceId, { room: room === "Sin espacio" ? "" : room });
+function scheduleBrightnessApply(deviceKeyValue, level) {
+  const previousTimer = state.brightnessTimers.get(deviceKeyValue);
+  if (previousTimer) {
+    window.clearTimeout(previousTimer);
+  }
+  const timerId = window.setTimeout(async () => {
+    state.brightnessTimers.delete(deviceKeyValue);
+    await applyBrightness(deviceKeyValue, level, { quiet: true });
+    await refreshDeviceStatus(deviceKeyValue, { quiet: true });
+    await refreshSystemStatus();
+  }, BRIGHTNESS_DEBOUNCE_MS);
+  state.brightnessTimers.set(deviceKeyValue, timerId);
+}
+
+function assignDeviceSpace(deviceKeyValue, room) {
+  setDeviceSpace(deviceKeyValue, room);
+  mergeDeviceUpdate(deviceKeyValue, { room: room === "Sin espacio" ? "" : room });
   renderDevices();
   syncKnownDevicesFromState();
   setGlobalFeedback("Device space updated.", "success");
 }
 
-function removeKnownDevice(deviceId) {
-  const knownDevices = loadKnownDevices().filter((device) => device.id !== deviceId);
+function removeKnownDevice(deviceKeyValue) {
+  const knownDevices = loadKnownDevices().filter((device) => {
+    const normalized = normalizeKnownDevice(device);
+    return normalized.device_key !== deviceKeyValue;
+  });
   saveKnownDevices(knownDevices);
-  setDeviceSpace(deviceId, "");
-  state.devices = state.devices.filter((device) => device.id !== deviceId);
+  setDeviceSpace(deviceKeyValue, "");
+  state.devices = state.devices.filter((device) => device.device_key !== deviceKeyValue);
   renderDevices();
   writeOutput("#known-device-output", { devices: knownDevices, count: knownDevices.length });
   setGlobalFeedback("Saved device removed from local catalog.", "success");
 }
 
-function resolveFormDeviceId(form, selectName = "device_select", textName = "device_id") {
-  return String(form.get(selectName) || form.get(textName) || "").trim();
+function resolveFormTarget(form, selectName = "device_select", textName = "device_id") {
+  const selected = String(form.get(selectName) || "").trim();
+  if (selected) {
+    return splitDeviceKey(selected);
+  }
+  const manualDeviceId = String(form.get(textName) || "").trim();
+  return {
+    provider: "tuya",
+    deviceId: manualDeviceId,
+    deviceKey: manualDeviceId ? deviceKey("tuya", manualDeviceId) : "",
+  };
 }
 
 function bindDeviceCardActions() {
@@ -851,10 +1054,13 @@ function bindDeviceCardActions() {
       applyColor(button.dataset.deviceCustomColor, input?.value?.trim() || "");
     });
   });
-  document.querySelectorAll("[data-device-brightness-apply]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const input = document.querySelector(`[data-device-brightness-input="${button.dataset.deviceBrightnessApply}"]`);
-      applyBrightness(button.dataset.deviceBrightnessApply, Number(input?.value || 0));
+  document.querySelectorAll("[data-device-brightness-input]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const deviceKeyValue = input.dataset.deviceBrightnessInput;
+      const level = Number(input.value || 0);
+      const label = document.querySelector(`[data-device-brightness-label="${deviceKeyValue}"]`);
+      if (label) label.textContent = `${level}%`;
+      scheduleBrightnessApply(deviceKeyValue, level);
     });
   });
   document.querySelectorAll("[data-device-room]").forEach((select) => {
@@ -885,28 +1091,40 @@ bindAction("[data-action='preview-refresh']", async () => {
   await refreshAmbilightPreview();
 });
 
+bindAction("[data-action='preview-apply-once']", async () => {
+  await applyCurrentPreviewFrame();
+});
+
+bindAction("[data-action='preview-live-start']", async () => {
+  await startLiveApply();
+});
+
+bindAction("[data-action='preview-live-stop']", () => {
+  stopLiveApply();
+});
+
 bindAction("[data-action='picker-on']", async () => {
-  if (!state.selectedDeviceId) {
+  if (!state.selectedDeviceKey) {
     setGlobalFeedback("Select a device first.", "error");
     return;
   }
-  await applyPower(state.selectedDeviceId, "on");
+  await applyPower(state.selectedDeviceKey, "on");
 });
 
 bindAction("[data-action='picker-off']", async () => {
-  if (!state.selectedDeviceId) {
+  if (!state.selectedDeviceKey) {
     setGlobalFeedback("Select a device first.", "error");
     return;
   }
-  await applyPower(state.selectedDeviceId, "off");
+  await applyPower(state.selectedDeviceKey, "off");
 });
 
 bindAction("[data-action='picker-refresh']", async () => {
-  if (!state.selectedDeviceId) {
+  if (!state.selectedDeviceKey) {
     setGlobalFeedback("Select a device first.", "error");
     return;
   }
-  await refreshDeviceStatus(state.selectedDeviceId);
+  await refreshDeviceStatus(state.selectedDeviceKey);
 });
 
 bindAction("[data-action='load-known-devices']", async () => {
@@ -952,6 +1170,7 @@ bindAction("[data-action='clear-debug']", async () => {
 
 bindForm("#known-device-form", async (form) => {
   const entry = normalizeKnownDevice({
+    provider: form.get("provider"),
     id: form.get("device_id"),
     name: form.get("name"),
     type_label: form.get("type_label") || "Known device",
@@ -962,17 +1181,21 @@ bindForm("#known-device-form", async (form) => {
     setGlobalFeedback("Device ID is required to save a known device.", "error");
     return;
   }
-  const knownDevices = loadKnownDevices().filter((device) => device.id !== entry.id);
+  const knownDevices = loadKnownDevices().filter((device) => normalizeKnownDevice(device).device_key !== entry.device_key);
   knownDevices.push({
     id: entry.id,
+    provider: entry.provider,
+    device_key: entry.device_key,
     name: entry.name,
     type_label: entry.type_label,
     category: entry.category,
     product_name: entry.product_name,
     is_rgb_capable: entry.is_rgb_capable,
+    supports_color: entry.supports_color,
+    brightness_supported: entry.brightness_supported,
     room: entry.room,
   });
-  if (entry.room) setDeviceSpace(entry.id, entry.room);
+  if (entry.room) setDeviceSpace(entry.device_key, entry.room);
   saveKnownDevices(knownDevices);
   setDevices(mergeKnownDevices(state.devices, knownDevices));
   syncKnownDevicesFromState();
@@ -984,8 +1207,10 @@ bindForm("#known-device-form", async (form) => {
 
 bindForm("#device-status-form", async (form) => {
   try {
+    const target = resolveFormTarget(form);
     const payload = await postJson("/api/get-device-status", {
-      device_id: resolveFormDeviceId(form),
+      provider: target.provider,
+      device_id: target.deviceId,
     });
     writeOutput("#device-status-output", payload);
     setGlobalFeedback("Manual status lookup completed.", "success");
@@ -999,8 +1224,10 @@ bindForm("#device-status-form", async (form) => {
 
 bindForm("#power-form", async (form) => {
   try {
+    const target = resolveFormTarget(form);
     const payload = await postJson("/api/set-power", {
-      device_id: resolveFormDeviceId(form),
+      provider: target.provider,
+      device_id: target.deviceId,
       zone: form.get("zone"),
       state: form.get("state"),
     });
@@ -1016,8 +1243,10 @@ bindForm("#power-form", async (form) => {
 
 bindForm("#fixed-color-form", async (form) => {
   try {
+    const target = resolveFormTarget(form);
     const payload = await postJson("/api/set-fixed-color", {
-      device_id: resolveFormDeviceId(form),
+      provider: target.provider,
+      device_id: target.deviceId,
       zone: form.get("zone"),
       rgb: form.get("rgb"),
     });
@@ -1033,8 +1262,10 @@ bindForm("#fixed-color-form", async (form) => {
 
 bindForm("#brightness-form", async (form) => {
   try {
+    const target = resolveFormTarget(form);
     const payload = await postJson("/api/set-brightness", {
-      device_id: resolveFormDeviceId(form),
+      provider: target.provider,
+      device_id: target.deviceId,
       level: Number(form.get("level")),
     });
     writeOutput("#brightness-output", payload);
@@ -1082,7 +1313,7 @@ bindForm("#sync-form", async (form) => {
 
 if (els.devicePicker) {
   els.devicePicker.addEventListener("change", (event) => {
-    state.selectedDeviceId = event.target.value;
+    state.selectedDeviceKey = event.target.value;
   });
 }
 
@@ -1104,12 +1335,14 @@ if (els.previewMonitorSelect) {
 }
 
 window.addEventListener("beforeunload", () => {
+  stopLiveApply();
   stopAmbilightPreview();
 });
 
-renderPreviewPlaceholder("Start preview to sample the main monitor.");
+renderPreviewPlaceholder("Start preview to sample the selected monitor.");
 updatePreviewStatus({ running: false, sampledAt: null });
 loadSavedDevicesIntoState();
 refreshDiagnostics();
 refreshSystemStatus();
+refreshAmbilightMapping({ quiet: true });
 refreshDevices();

@@ -144,3 +144,4 @@ upload*
 *.local.yaml
 docs/sample_frame.png
 pytest-cache-files-*
+config/dashboard_state.json

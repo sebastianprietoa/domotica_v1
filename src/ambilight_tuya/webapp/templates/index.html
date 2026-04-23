@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Ambilight Tuya Localhost v2026.04.22-8</title>
+    <title>Ambilight Tuya Localhost v2026.04.22-9</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   </head>
   <body>
@@ -13,12 +13,12 @@
           <p class="eyebrow">Smart home dashboard</p>
           <h1>Ambilight Tuya Control Center</h1>
           <p class="lede">
-            Controla luces, switches y dispositivos Tuya desde una vista unificada con enfoque en estado,
-            energia y acciones rapidas.
+            Controla luces, switches y dispositivos mixtos de Tuya y Philips Hue desde una vista unificada con
+            enfoque en estado, energia, brillo y mapeo Ambilight.
           </p>
         </div>
         <div class="hero-meta">
-          <span class="build-badge">Version UI: v2026.04.22-8</span>
+          <span class="build-badge">Version UI: v2026.04.22-9</span>
           <div class="hero-stats">
             <div class="hero-stat">
               <span class="hero-stat-label">Devices</span>
@@ -44,6 +44,7 @@
         <div class="action-meta">
           <span class="pill" id="last-refresh-pill">Never refreshed</span>
           <span class="pill pill-muted" id="oauth-pill">OAuth idle</span>
+          <span class="pill pill-muted" id="hue-pill">Hue idle</span>
         </div>
       </section>
 
@@ -51,7 +52,7 @@
         <div class="panel-toolbar">
           <div>
             <h3>Device picker</h3>
-            <p class="panel-copy">Selecciona un equipo conocido para control rapido sin pegar `device_id`.</p>
+            <p class="panel-copy">Selecciona un equipo conocido para control rapido sin pegar `device_id`, incluso si conviven Tuya y Hue.</p>
           </div>
         </div>
         <div class="quick-control-grid">
@@ -84,6 +85,9 @@
             <button type="button" data-action="preview-start">Start preview</button>
             <button type="button" class="button-secondary" data-action="preview-stop">Stop preview</button>
             <button type="button" class="button-ghost" data-action="preview-refresh">Refresh once</button>
+            <button type="button" class="button-secondary" data-action="preview-apply-once">Apply current frame</button>
+            <button type="button" class="button-secondary" data-action="preview-live-start">Start live apply</button>
+            <button type="button" class="button-ghost" data-action="preview-live-stop">Stop live apply</button>
           </div>
         </div>
         <div class="quick-control-grid preview-control-grid">
@@ -98,6 +102,7 @@
           <span class="pill pill-muted" id="preview-rate-pill">4 fps target</span>
           <span class="pill pill-muted" id="preview-sampled-pill">No sample yet</span>
           <span class="pill pill-muted" id="preview-monitor-pill">Primary monitor</span>
+          <span class="pill pill-muted" id="preview-apply-pill">Live apply idle</span>
         </div>
         <div class="ambilight-grid" id="ambilight-grid" aria-live="polite">
           <div class="ambilight-empty">Start preview to sample the main monitor.</div>
@@ -119,6 +124,12 @@
             </div>
             <form id="known-device-form" class="stack-form catalog-form">
               <label>Device name <input name="name" placeholder="Living 4" required></label>
+              <label>Provider
+                <select name="provider">
+                  <option value="tuya">Tuya</option>
+                  <option value="hue">Hue</option>
+                </select>
+              </label>
               <label>Device ID <input name="device_id" placeholder="eb1f8a..." required></label>
               <label>Type label <input name="type_label" placeholder="RGB light | Switch | Socket"></label>
               <label>Space
@@ -276,7 +287,7 @@
             <div class="panel-toolbar">
               <div>
                 <h3>Tuya diagnostics</h3>
-                <p class="panel-copy">Use this when you need screenshots of auth attempts, request codes or device command failures.</p>
+                <p class="panel-copy">Use this when you need screenshots of auth attempts, provider request codes or device command failures.</p>
               </div>
               <div class="actions">
                 <button type="button" data-action="refresh-debug">Refresh logs</button>

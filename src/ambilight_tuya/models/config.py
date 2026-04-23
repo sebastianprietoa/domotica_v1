@@ -15,6 +15,12 @@ class TuyaCredentials:
 
 
 @dataclass(frozen=True)
+class HueCredentials:
+    bridge_ip: str
+    application_key: str
+
+
+@dataclass(frozen=True)
 class CaptureConfig:
     monitor_index: int = 1
     downsample: int = 4

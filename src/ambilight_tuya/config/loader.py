@@ -13,6 +13,7 @@ from ambilight_tuya.models import (
     ColorExtractionConfig,
     CommandProfile,
     DeviceMapping,
+    HueCredentials,
     SmoothingConfig,
     TuyaCredentials,
     ZoneConfig,
@@ -124,6 +125,18 @@ def load_tuya_credentials() -> TuyaCredentials:
         app_identifier=os.getenv("TUYA_APP_IDENTIFIER", "com.sebastianprietoa.ambilight.localhost").strip() or None,
         mq_endpoint=os.getenv("TUYA_MQ_ENDPOINT") or None,
         default_device_id=os.getenv("TUYA_DEFAULT_DEVICE_ID") or None,
+    )
+
+
+def load_hue_credentials() -> HueCredentials | None:
+    load_dotenv()
+    bridge_ip = os.getenv("HUE_BRIDGE_IP", "").strip()
+    application_key = os.getenv("HUE_APPLICATION_KEY", "").strip()
+    if not bridge_ip or not application_key:
+        return None
+    return HueCredentials(
+        bridge_ip=bridge_ip,
+        application_key=application_key,
     )
 
 

@@ -254,6 +254,16 @@ button:disabled {
   color: #94abc0;
 }
 
+.provider-badge.provider-tuya {
+  background: rgba(27, 143, 255, 0.12);
+  color: #9ed0ff;
+}
+
+.provider-badge.provider-hue {
+  background: rgba(255, 194, 74, 0.14);
+  color: #ffe39b;
+}
+
 .badge-online,
 .badge-on {
   background: rgba(24, 183, 135, 0.16);
@@ -536,6 +546,11 @@ button:disabled {
   align-items: end;
 }
 
+.preview-control-grid {
+  margin-top: 14px;
+  margin-bottom: 4px;
+}
+
 .quick-control-actions {
   display: flex;
   gap: 10px;
@@ -587,6 +602,34 @@ button:disabled {
   letter-spacing: 0.04em;
 }
 
+.ambilight-cell-assignment {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ambilight-cell-label {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  opacity: 0.95;
+}
+
+.ambilight-cell-assignment select {
+  width: 100%;
+  background: rgba(6, 14, 22, 0.62);
+  color: var(--text);
+  border: 1px solid rgba(240, 248, 255, 0.16);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.ambilight-cell-assigned {
+  min-height: 1.6rem;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.94);
+}
+
 .ambilight-empty {
   grid-column: 1 / -1;
   display: grid;
@@ -636,7 +679,7 @@ button:disabled {
 
 .dimmer-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr;
   gap: 12px;
   align-items: center;
 }
